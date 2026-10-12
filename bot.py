@@ -1,4 +1,4 @@
-import os, re, sys, json, time, wave, base64, shutil, asyncio, subprocess, urllib.request, urllib.parse
+import os, re, sys, json, time, wave, base64, shutil, struct, asyncio, subprocess, urllib.request, urllib.parse
 from pathlib import Path
 
 for pkg in ["edge-tts", "yt-dlp[default,curl-cffi]", "pytubefix", "btch-downloader", "gTTS"]:
@@ -16,11 +16,13 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 DB_FILE = "users.json"
 SESSIONS, ACTIVE_TASKS = {}, {}
 
-VOICE_MAP = {"Thiha": "my-MM-ThihaNeural", "Nilar": "my-MM-NilarNeural"}
-VOICES = ["Thiha", "Nilar"]
+EDGE_MAP = {"Thiha": "my-MM-ThihaNeural", "Nilar": "my-MM-NilarNeural"}
+GEMINI_FALLBACK_MAP = {"Thiha": "Charon", "Nilar": "Zephyr"}
+VOICES = ["Thiha", "Nilar", "Zephyr", "Charon", "Kore", "Puck", "Fenrir"]
 CHANNELS = [("@moviezone336", "https://t.me/moviezone336", "📢 Channel 1 Join ရန်"), ("@color6777", "https://t.me/color6777", "📢 Channel 2 Join ရန်"), ("@sigyi89", "https://t.me/sigyi89", "📢 Channel 3 Join ရန်")]
 MODELS = [x.strip().removeprefix("models/") for x in os.getenv("GEMINI_MODELS", "gemini-2.5-flash,gemini-2.0-flash").split(",") if x.strip() and "flash" in x.lower()]
 MODELS = MODELS or ["gemini-2.5-flash", "gemini-2.0-flash"]
+TTS_MODELS = ["gemini-2.5-flash-preview-tts", "gemini-3.1-flash-tts-preview"]
 
 def try_run(fn, *a, **kw):
     try:
@@ -35,7 +37,7 @@ def get_u(uid):
     db, k = get_db(), str(uid)
     d = db.get(k, {})
     keys = d.get("keys", []) or ([d["key"]] if d.get("key") else [])
-    v = d.get("v", "Thiha") if d.get("v") in VOICES else "Thiha"
+    v = d.get("v", "Zephyr") if d.get("v") in VOICES else "Zephyr"
     if k not in db or "keys" not in d or d.get("v") not in VOICES:
         db[k] = {"keys": keys, "k_idx": d.get("k_idx", 0), "v": v, "f": d.get("f", True), "layout": d.get("layout", "frame"), "blur": d.get("blur", "auto"), "logo": d.get("logo", True), "verified": d.get("verified", False)}
         json.dump(db, open(DB_FILE, "w"))
@@ -104,24 +106,25 @@ def key_menu_ui(u):
     return txt, InlineKeyboardMarkup(kb)
 
 def voice_menu_ui(u):
-    cur = u.get("v", "Thiha")
-    txt = f"🎙️ မြန်မာအသံရွေးချယ်ရန် (1.25x Speed)\nလက်ရှိအသံ - {'👨 Thiha (Male)' if cur == 'Thiha' else '👩 Nilar (Female)'}\n━━━━━━━━━━━━━━"
-    r1 = [InlineKeyboardButton(f"{'🟢' if cur == 'Thiha' else '⚪'} 👨 Thiha (Male)", callback_data="v|Thiha")]
-    r2 = [InlineKeyboardButton(f"{'🟢' if cur == 'Nilar' else '⚪'} 👩 Nilar (Female)", callback_data="v|Nilar")]
-    r3 = [InlineKeyboardButton("🔙 Dashboard သို့ ပြန်သွားရန်", callback_data="m|dash")]
-    return txt, InlineKeyboardMarkup([r1, r2, r3])
+    cur = u.get("v", "Zephyr")
+    txt = f"🎙️ အသံရွေးချယ်ရန် (Speed: 1.25x)\nလက်ရှိအသံ - 🌟 {cur}\n💡 (Thiha/Nilar မရပါက Google AI Zephyr/Charon သို့ အလိုအလျောက် ပြောင်းပေးပါမည်)\n━━━━━━━━━━━━━━"
+    r1 = [InlineKeyboardButton(f"{'🟢' if cur=='Zephyr' else '⚪'} 🌟 Zephyr", callback_data="v|Zephyr"), InlineKeyboardButton(f"{'🟢' if cur=='Charon' else '⚪'} 🌟 Charon", callback_data="v|Charon")]
+    r2 = [InlineKeyboardButton(f"{'🟢' if cur=='Kore' else '⚪'} 🌟 Kore", callback_data="v|Kore"), InlineKeyboardButton(f"{'🟢' if cur=='Puck' else '⚪'} 🌟 Puck", callback_data="v|Puck"), InlineKeyboardButton(f"{'🟢' if cur=='Fenrir' else '⚪'} 🌟 Fenrir", callback_data="v|Fenrir")]
+    r3 = [InlineKeyboardButton(f"{'🟢' if cur=='Thiha' else '⚪'} 👨 Thiha", callback_data="v|Thiha"), InlineKeyboardButton(f"{'🟢' if cur=='Nilar' else '⚪'} 👩 Nilar", callback_data="v|Nilar")]
+    r4 = [InlineKeyboardButton("🔙 Dashboard သို့ ပြန်သွားရန်", callback_data="m|dash")]
+    return txt, InlineKeyboardMarkup([r1, r2, r3, r4])
 
 def dash_ui(u, uid):
     k_cnt = len(u.get("keys", []))
     kt = f"✅ ({k_cnt}) ခု ချိတ်ပြီး" if k_cnt > 0 else "❌ မရှိသေးပါ"
-    v_lbl = f"{u.get('v', 'Thiha')} (1.25x)"
+    v_lbl = f"{u.get('v', 'Zephyr')} (1.25x)"
     lay = "📱 Blur Frame" if u["layout"] == "frame" else "📲 Full Screen"
     bm = {"auto": "🎯 Auto-Detect", "low": "အောက်ခြေ", "mid": "အလယ်အောက်", "high": "အလယ်", "off": "OFF ❌"}
     b_txt = bm.get(u["blur"], "🎯 Auto-Detect")
     lg_t = ("ON ✅" if u["logo"] else "OFF ❌") if os.path.exists(f"logo_{uid}.jpg") else "ပုံမထည့်ရသေး"
     fl_t = "ON ✅" if u["f"] else "OFF ❌"
     kb = [[InlineKeyboardButton(f"🔑 API Keys: {kt}", callback_data="m|key")], [InlineKeyboardButton(f"🎙️ Voice: {v_lbl}", callback_data="m|vmenu"), InlineKeyboardButton(f"🖼️ {lay}", callback_data="m|lay")], [InlineKeyboardButton(f"🌫️ Blur: {b_txt}", callback_data="m|blur"), InlineKeyboardButton(f"🏷️ Logo: {lg_t}", callback_data="m|logo")], [InlineKeyboardButton(f"🪞 Flip + Filter + Crop: {fl_t}", callback_data="m|f")]]
-    txt = f"⚡ SIGYI AI STUDIO PRO (ULTRA HD) ⚡\n━━━━━━━━━━━━━━\n• 🔑 API Keys: {kt} (Auto-Rotation ✅)\n• 🤖 Model: API Key နှင့် ကိုက်ညီသော Gemini Model (Auto)\n• 🎙️ Voice: {v_lbl} | 📺 Ultra HD\n• 🖼️ {lay} | 🌫️ Blur: {b_txt}\n• 🎯 Scene-Locked Frame Sync: Active ✅\n━━━━━━━━━━━━━━\n📥 TikTok / YouTube / Rednote Link သို့မဟုတ် Video ပို့ပါ!\n💡 (Bot အလုပ်မလုပ်ပါက /start ကို နှိပ်ပါ)"
+    txt = f"⚡ SIGYI AI STUDIO PRO (ULTRA HD) ⚡\n━━━━━━━━━━━━━━\n• 🔑 API Keys: {kt} (Auto-Rotation ✅)\n• 🤖 AI: Gemini Flash + Google AI TTS ✅\n• 🎙️ Voice: {v_lbl} | 📺 Ultra HD\n• 🖼️ {lay} | 🌫️ Blur: {b_txt}\n• 🎯 Scene-Locked Frame Sync: Active ✅\n━━━━━━━━━━━━━━\n📥 TikTok / YouTube / Rednote Link သို့မဟုတ် Video ပို့ပါ!\n💡 (Bot အလုပ်မလုပ်ပါက /start ကို နှိပ်ပါ)"
     return txt, InlineKeyboardMarkup(kb)
 
 def is_valid_video(p):
@@ -300,12 +303,12 @@ def ai_frame_audio_translate(vpath, sm_v, uid, vdur, n_win):
         raise Exception("API Key မရှိပါ။ Key အရင်ထည့်ပေးပါ။")
     start_idx = u.get("k_idx", 0) % len(keys)
     w_dur = vdur / n_win
-    chars_w = max(65, int((w_dur / 0.85) * 13.0))
+    chars_w = max(65, int(w_dur * 15.2))
     win_desc = "၊ ".join([f"အပိုင်း {i+1} ({int(i*w_dur)}s မှ {int((i+1)*w_dur)}s)" for i in range(n_win)])
     p = f"ဒီ Video ဖိုင်ရဲ့ ရုပ်ပုံ (Frames) နဲ့ မူရင်းအသံ (Audio) နှစ်ခုလုံးကို သေချာကြည့်ရှုနားထောင်ပြီး အောက်ပါ အချိန်အပိုင်းအခြား ({n_win}) ပိုင်းအတိုင်း အတိအကျ ခွဲ၍ အပိုအလိုမရှိဘဲ Burmese Professional Movie Recap စကားပြောပုံစံဖြင့် ဘာသာပြန်ပေးပါ - {win_desc}\n\n"
     p += "အတိအကျ လိုက်နာရမည့် ဥပမာ အရေးအသားပုံစံ -\n"
     p += "အမျိုးသားတစ်ယောက်ဟာ လှေပေါ်မှာ ဓားနဲ့ ကစားနေရင်း မတော်တဆ အပေါက်ဖောက်မိသွားတဲ့အတွက် ရေတွေ စတင် စိမ့်ဝင်လာပါတယ်။ ရေတွေက သင်္ဘောကုန်းပတ်ပေါ်အထိ လျင်မြန်စွာ တက်လာချိန်မှာပဲ တခြားလှေတစ်စင်း ချဉ်းကပ်လာတာကို သူ မြင်လိုက်ရပါတယ်။ ||| သူက သူ့ခြေထောက်နဲ့ အပေါက်ကို အမြန်ဖုံးအုပ်ပြီး ဘာမှမဖြစ်သလို ဟန်ဆောင်လိုက်ပါတယ်။ ရုတ်တရက်ဆိုသလိုပဲ ကင်းလှည့်ရေယာဉ်တစ်စင်း သူတို့ရှေ့မှာ ပေါ်လာပါတယ်။ သူတို့တွေက ငါးဖမ်းသမားတွေလို ဟန်ဆောင်ကြပေမဲ့ ရန်သူခေါင်းဆောင်ကတော့ တစ်ခုခု လွဲနေတယ်လို့ သံသယဝင်သွားပြီး စစ်ဆေးဖို့အတွက် သူတို့လှေပေါ်ကို တက်လာပါတော့တယ်။ ||| ခေါင်းဆောင်က အန်နာ ဆီကို လျှောက်သွားပြီး ငါးမျှားတံကို ကောက်ကိုင်ကာ ငါးဖမ်းဟန်ဆောင်လိုက်ပါတယ်။ အန်နာက လျင်မြန်စွာ လှည့်လိုက်တဲ့အခါ ငါးမျှားတံက သူမလက်ထဲကနေ လွင့်စင်သွားခဲ့ပါတယ်။\n\n"
-    p += f"စည်းကမ်းချက် - အပိုင်းတစ်ပိုင်းစီအတွက် အဲ့ဒီအချိန်အတွင်း မြင်ရကြားရသည့်အတိုင်း မြန်မာစာလုံးရေ {chars_w} လုံးခန့် ရေးပြီး အပိုင်းကြားတွင် ||| သင်္ကေတ ခြားပေးပါ။ လူနာမည်များကို မြန်မာလိုသာရေးပါ၊ အင်္ဂလိပ်စာလုံးနှင့် ကွင်းစကွင်းပိတ် လုံးဝ မထည့်ပါနှင့်။"
+   p += f"စည်းကမ်းချက် - အပိုင်းတစ်ပိုင်းစီအတွက် အဲ့ဒီအချိန်အတွင်း မြင်ရကြားရသည့်အတိုင်း မြန်မာစာလုံးရေ {chars_w} လုံးခန့် ရေးပြီး အပိုင်းကြားတွင် ||| သင်္ကေတ ခြားပေးပါ။ လူနာမည်များကို မြန်မာလိုသာရေးပါ၊ အင်္ဂလိပ်စာလုံးနှင့် ကွင်းစကွင်းပိတ် လုံးဝ မထည့်ပါနှင့်။"
     raw_txt, last_err = "", None
     for step_i in range(len(keys)):
         k_i = (start_idx + step_i) % len(keys)
@@ -340,6 +343,85 @@ def ai_frame_audio_translate(vpath, sm_v, uid, vdur, n_win):
         st = max(1, len(sents) / n_win)
         parts = [" ".join(sents[int(round(i*st)):max(int(round(i*st))+1, int(round((i+1)*st)) if i < n_win-1 else len(sents))]) or sents[-1] for i in range(n_win)]
     return parts
+
+def _write_pcm_or_riff(pcm, wav_path):
+    if pcm[:4] == b"RIFF":
+        open(wav_path, "wb").write(pcm)
+        return
+    with wave.open(wav_path, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(24000)
+        wf.writeframes(pcm)
+
+def _extract_tts_pcm(res):
+    pcm = b""
+    for part in res.candidates[0].content.parts:
+        if getattr(part, "inline_data", None) and part.inline_data.data:
+            d = part.inline_data.data
+            pcm += base64.b64decode(d) if isinstance(d, str) else d
+    return pcm
+
+def _gemini_tts_call(text, g_voice, out_wav, uid, key_offset=0):
+    u = get_u(uid)
+    keys = u.get("keys", [])
+    if not keys:
+        return False
+    start_idx = (u.get("k_idx", 0) + key_offset) % len(keys)
+    pvc = types.PrebuiltVoiceConfig(voice_name=g_voice)
+    cfg = types.GenerateContentConfig(response_modalities=["AUDIO"], speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(prebuilt_voice_config=pvc)))
+    prompt = f"Read the following Burmese narration aloud naturally and clearly in Burmese:\n\n{text}"
+    for step_i in range(len(keys)):
+        k_i = (start_idx + step_i) % len(keys)
+        client = genai.Client(api_key=keys[k_i].strip(), http_options=types.HttpOptions(timeout=45000))
+        for tm in TTS_MODELS:
+            res = try_run(lambda: client.models.generate_content(model=tm, contents=prompt, config=cfg))
+            pcm = try_run(lambda: _extract_tts_pcm(res)) if res else b""
+            if pcm and len(pcm) > 800:
+                _write_pcm_or_riff(pcm, out_wav)
+                if is_valid_audio(out_wav):
+                    set_u(uid, "k_idx", k_i)
+                    return True
+    return False
+
+def _detect_silence_midpoints(wav_path):
+    r = subprocess.run(["ffmpeg", "-i", wav_path, "-af", "silencedetect=n=-38dB:d=0.14", "-f", "null", "-"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    starts = [float(x) for x in re.findall(r"silence_start:\s*([0-9.]+)", r.stderr)]
+    ends = [float(x) for x in re.findall(r"silence_end:\s*([0-9.]+)", r.stderr)]
+    return [(s + e) / 2.0 for s, e in zip(starts, ends)]
+
+def _gemini_single_call_and_slice(seg_scripts, g_voice, work, uid):
+    joined_txt = "\n\n".join(clean_mm_text(s) or "အဲ့ဒီနောက်မှာတော့" for s in seg_scripts)
+    raw_full = os.path.join(work, "g_full_raw.wav")
+    clean_full = os.path.join(work, "g_full_125x.wav")
+    if not _gemini_tts_call(joined_txt, g_voice, raw_full, uid, 0):
+        return None
+    af = "silenceremove=start_periods=1:start_duration=0.02:start_threshold=-45dB,areverse,silenceremove=start_periods=1:start_duration=0.02:start_threshold=-45dB,areverse,atempo=1.25,highpass=f=80,loudnorm=I=-16:TP=-1.5:LRA=11,aresample=24000,asetpts=PTS-STARTPTS"
+    subprocess.run(["ffmpeg", "-y", "-i", raw_full, "-af", af, "-ac", "1", "-ar", "24000", clean_full], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if not is_valid_audio(clean_full):
+        return None
+    tot_dur = max(1.0, get_dur(clean_full))
+    mids = _detect_silence_midpoints(clean_full)
+    weights = [max(1, len(clean_mm_text(s))) for s in seg_scripts]
+    tot_w = sum(weights) or 1
+    cuts = [0.0]
+    acc = 0.0
+    for i in range(len(seg_scripts) - 1):
+        acc += weights[i]
+        expected_t = tot_dur * (acc / tot_w)
+        near = [m for m in mids if abs(m - expected_t) <= max(1.8, tot_dur * 0.08) and m > cuts[-1] + 0.4]
+        best_cut = min(near, key=lambda m: abs(m - expected_t)) if near else max(cuts[-1] + 0.4, expected_t)
+        cuts.append(min(tot_dur - 0.3, best_cut))
+    cuts.append(tot_dur)
+    seg_wavs = []
+    for i in range(len(seg_scripts)):
+        sw = os.path.join(work, f"g_slice_{i}.wav")
+        st_t, en_t = cuts[i], max(cuts[i] + 0.4, cuts[i + 1])
+        subprocess.run(["ffmpeg", "-y", "-i", clean_full, "-ss", f"{st_t:.3f}", "-to", f"{en_t:.3f}", "-ac", "1", "-ar", "24000", sw], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if not is_valid_audio(sw):
+            return None
+        seg_wavs.append(sw)
+    return seg_wavs
 
 def _save_gtts_chunk(chunk, path):
     for attempt in range(3):
@@ -378,61 +460,84 @@ def _google_tts_fallback(text, output_mp3, uid, seg_index):
         for path in chunk_paths + [list_path]:
             try_run(os.remove, path)
 
-async def build_free_synced_voice(seg_scripts, voice_key, out_a, uid, vdur):
-    """Generate clean 1.25x narration per scene and pace each segment so video never speeds up."""
-    voice = VOICE_MAP.get(voice_key, VOICE_MAP["Thiha"])
-    n_win = max(1, len(seg_scripts))
+def _ pace_and_concat_segments(raw_seg_wavs, work, out_a, vdur):
+    n_win = max(1, len(raw_seg_wavs))
     w_dur = vdur / n_win
-    slot_target = (vdur / 0.85) / n_win
+    slot_target = (vdur / 0.90) / n_win
+    final_wavs, seg_durs = [], []
+    for i, cw in enumerate(raw_seg_wavs):
+        fw = os.path.join(work, f"fw_{i}.wav")
+        raw_d = max(0.5, get_dur(cw))
+        tempo_adj = max(0.92, min(1.08, raw_d / max(0.5, slot_target)))
+        min_seg_d = w_dur * 1.01
+        af_fit = f"atempo={tempo_adj:.4f},apad=whole_dur={min_seg_d:.3f},asetpts=PTS-STARTPTS"
+        subprocess.run(["ffmpeg", "-y", "-i", cw, "-af", af_fit, "-ac", "1", "-ar", "24000", fw], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        use_w = fw if is_valid_audio(fw) else cw
+        final_wavs.append(use_w)
+        seg_durs.append(max(0.5, get_dur(use_w)))
+    list_f = os.path.join(work, "concat.txt")
+    Path(list_f).write_text("".join("file '" + os.path.abspath(w).replace("'", "'\\''") + "'\n" for w in final_wavs), encoding="utf-8")
+    r = subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_f, "-c:a", "aac", "-b:a", "160k", out_a], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
+    if r.returncode != 0 or not is_valid_audio(out_a):
+        raise RuntimeError("Narration audio concat failed")
+    return seg_durs
+
+async def build_free_synced_voice(seg_scripts, voice_key, out_a, uid, vdur):
     work = f"tts_{uid}_{int(time.time() * 1000)}"
     os.makedirs(work, exist_ok=True)
-    wavs, seg_durs = [], []
-    edge_ok = True
     try:
-        for i, script in enumerate(seg_scripts):
-            text = clean_mm_text(script) or "အဲ့ဒီနောက်မှာတော့"
-            raw = os.path.join(work, f"raw_{i}.mp3")
-            cw = os.path.join(work, f"cw_{i}.wav")
-            fw = os.path.join(work, f"fw_{i}.wav")
-            used_fallback = False
-            if edge_ok:
-                for attempt in range(3):
+        raw_seg_wavs = []
+        # 1. Try Thiha / Nilar (Edge-TTS at 1.25x) if selected
+        if voice_key in EDGE_MAP:
+            edge_v = EDGE_MAP[voice_key]
+            edge_ok = True
+            for i, script in enumerate(seg_scripts):
+                text = clean_mm_text(script) or "အဲ့ဒီနောက်မှာတော့"
+                raw = os.path.join(work, f"edge_{i}.mp3")
+                cw = os.path.join(work, f"cw_{i}.wav")
+                for attempt in range(2):
                     try_run(os.remove, raw)
                     try:
-                        await asyncio.wait_for(edge_tts.Communicate(text=text, voice=voice, rate="+25%").save(raw), timeout=20)
+                        await asyncio.wait_for(edge_tts.Communicate(text=text, voice=edge_v, rate="+25%").save(raw), timeout=15)
                     except Exception:
-                        try_run(lambda: subprocess.run([sys.executable, "-m", "edge_tts", "--voice", voice, "--rate=+25%", "--text", text, "--write-media", raw], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20))
+                        try_run(lambda: subprocess.run([sys.executable, "-m", "edge_tts", "--voice", edge_v, "--rate=+25%", "--text", text, "--write-media", raw], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15))
                     if is_valid_audio(raw):
                         break
-                    await asyncio.sleep(0.8)
                 if not is_valid_audio(raw):
                     edge_ok = False
-            if not is_valid_audio(raw):
-                used_fallback = True
-                if not await asyncio.to_thread(_google_tts_fallback, text, raw, uid, i):
+                    break
+                af = "silenceremove=start_periods=1:start_duration=0.02:start_threshold=-45dB,areverse,silenceremove=start_periods=1:start_duration=0.02:start_threshold=-45dB,areverse,highpass=f=80,loudnorm=I=-16:TP=-1.5:LRA=11,aresample=24000,asetpts=PTS-STARTPTS"
+                subprocess.run(["ffmpeg", "-y", "-i", raw, "-af", af, "-ac", "1", "-ar", "24000", cw], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=45)
+                if not is_valid_audio(cw):
+                    edge_ok = False
+                    break
+                raw_seg_wavs.append(cw)
+            if edge_ok and len(raw_seg_wavs) == len(seg_scripts):
+                return await asyncio.to_thread(_pace_and_concat_segments, raw_seg_wavs, work, out_a, vdur)
+
+        # 2. Google AI Studio Natural TTS (Zephyr, Charon, Kore, Puck, Fenrir) at 1.25x Speed
+        g_voice = GEMINI_FALLBACK_MAP.get(voice_key, voice_key if voice_key in VOICES else "Zephyr")
+        sliced = await asyncio.to_thread(_gemini_single_call_and_slice, seg_scripts, g_voice, work, uid)
+        if sliced and len(sliced) == len(seg_scripts):
+            return await asyncio.to_thread(_pace_and_concat_segments, sliced, work, out_a, vdur)
+
+        # 3. Per-segment Google AI Studio TTS with Multi-Key Rotation fallback
+        raw_seg_wavs = []
+        for i, script in enumerate(seg_scripts):
+            text = clean_mm_text(script) or "အဲ့ဒီနောက်မှာတော့"
+            raw_w = os.path.join(work, f"gseg_raw_{i}.wav")
+            cw = os.path.join(work, f"gseg_cw_{i}.wav")
+            ok_g = await asyncio.to_thread(_gemini_tts_call, text, g_voice, raw_w, uid, i)
+            if not ok_g:
+                raw_w = os.path.join(work, f"gtts_{i}.mp3")
+                if not await asyncio.to_thread(_google_tts_fallback, text, raw_w, uid, i):
                     raise RuntimeError(f"TTS အသံထုတ်မရပါ (Segment {i + 1})")
-            spd_f = ("asetrate=24000*0.88,aresample=24000,atempo=1.42," if voice_key == "Thiha" else "atempo=1.25,") if used_fallback else ""
-            # Use areverse to trim only leading and trailing silence without cutting internal pauses
-            af = f"silenceremove=start_periods=1:start_duration=0.02:start_threshold=-45dB,areverse,silenceremove=start_periods=1:start_duration=0.02:start_threshold=-45dB,areverse,{spd_f}highpass=f=80,volume=2.4,alimiter=limit=0.96,aresample=24000,asetpts=PTS-STARTPTS"
-            r = await asyncio.to_thread(subprocess.run, ["ffmpeg", "-y", "-i", raw, "-af", af, "-ac", "1", "-ar", "24000", cw], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
-            if r.returncode != 0 or not is_valid_audio(cw):
-                r = await asyncio.to_thread(subprocess.run, ["ffmpeg", "-y", "-i", raw, "-af", "atempo=1.25", "-ac", "1", "-ar", "24000", cw], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
+            af = "silenceremove=start_periods=1:start_duration=0.02:start_threshold=-45dB,areverse,silenceremove=start_periods=1:start_duration=0.02:start_threshold=-45dB,areverse,atempo=1.25,highpass=f=80,loudnorm=I=-16:TP=-1.5:LRA=11,aresample=24000,asetpts=PTS-STARTPTS"
+            subprocess.run(["ffmpeg", "-y", "-i", raw_w, "-af", af, "-ac", "1", "-ar", "24000", cw], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=45)
             if not is_valid_audio(cw):
                 raise RuntimeError(f"Audio conversion failed at segment {i + 1}")
-            raw_d = max(0.6, get_dur(cw))
-            tempo_adj = max(0.88, min(1.15, raw_d / max(0.6, slot_target)))
-            min_seg_d = w_dur * 1.02
-            af_fit = f"atempo={tempo_adj:.4f},apad=whole_dur={min_seg_d:.3f},asetpts=PTS-STARTPTS"
-            await asyncio.to_thread(subprocess.run, ["ffmpeg", "-y", "-i", cw, "-af", af_fit, "-ac", "1", "-ar", "24000", fw], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
-            use_w = fw if is_valid_audio(fw) else cw
-            wavs.append(use_w)
-            seg_durs.append(max(0.6, get_dur(use_w)))
-        list_f = os.path.join(work, "concat.txt")
-        Path(list_f).write_text("".join("file '" + os.path.abspath(w).replace("'", "'\\''") + "'\n" for w in wavs), encoding="utf-8")
-        r = await asyncio.to_thread(subprocess.run, ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_f, "-c:a", "aac", "-b:a", "160k", out_a], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
-        if r.returncode != 0 or not is_valid_audio(out_a):
-            raise RuntimeError("Narration audio concat failed")
-        return seg_durs
+            raw_seg_wavs.append(cw)
+        return await asyncio.to_thread(_pace_and_concat_segments, raw_seg_wavs, work, out_a, vdur)
     finally:
         try_run(shutil.rmtree, work, True)
 
@@ -480,14 +585,14 @@ def build_piecewise_pts(vdur, seg_durs):
     ex = f"{ss[-1]:.4f}+(T-{ts[-1]:.4f})*{sl[-1]:.4f}"
     for i in range(n - 2, -1, -1):
         ex = f"if(lt(T,{ts[i+1]:.4f}),{ss[i]:.4f}+(T-{ts[i]:.4f})*{sl[i]:.4f},{ex})"
-    return f"trim=duration={vdur:.3f},setpts=PTS-STARTPTS,setpts='({ex})/TB',fps=30"
+    return f"trim=duration={vdur:.3f},fps=30,settb=AVTB,setpts=PTS-STARTPTS,setpts='({ex})/TB',fps=30"
 
 def edit_vid(iv, ia, ov, u, uid, vdur, seg_durs):
     out_dur = max(get_dur(ia), 1.0)
     is_fr, fl = (u.get("layout", "frame") == "frame"), (",hflip" if u.get("f") else "")
     adj = "crop=iw*0.92:ih*0.92:iw*0.04:ih*0.04,eq=contrast=1.08:brightness=0.02:saturation=1.14:gamma=1.03,hue=h=3,unsharp=3:3:0.65:3:3:0.0"
     pw_s = build_piecewise_pts(vdur, seg_durs)
-    un_s = f"trim=duration={vdur:.3f},setpts={out_dur/max(vdur,1.0):.4f}*(PTS-STARTPTS),fps=30"
+    un_s = f"trim=duration={vdur:.3f},fps=30,setpts={out_dur/max(vdur,1.0):.4f}*(PTS-STARTPTS),fps=30"
     b_map = {"low": (950, 86), "mid": (880, 86), "high": (790, 86)} if is_fr else {"low": (1040, 92), "mid": (940, 92), "high": (830, 92)}
     by, bh = detect_sub_band(iv, vdur, is_fr, uid) if u.get("blur") == "auto" else b_map.get(u.get("blur"), (950, 86))
     by, bh = (int(by) // 2) * 2, max(64, (int(bh) // 2) * 2)
@@ -591,12 +696,12 @@ async def run_render_job(q, context, uid):
             raise RuntimeError("Input video မမှန်ကန်ပါ")
         source_duration = max(1.0, get_dur(vpath))
         vdur = min(source_duration, 180.0)
-        n_win = 3 if vdur <= 28 else (4 if vdur <= 60 else (5 if vdur <= 110 else 6))
+        n_win = max(3, min(8, int(round(vdur / 12.0))))
         stage = "Gemini scene analysis"
         await q.edit_message_text(f"🔄 [30%] Video Frame + မူရင်းအသံကို အပိုင်း ({n_win}) ပိုင်းခွဲ၍ အတိအကျ ဘာသာပြန်နေပါသည်...{hint}", reply_markup=cancel_kb())
         seg_scripts = await asyncio.wait_for(asyncio.to_thread(ai_frame_audio_translate, vpath, sm_v, uid, vdur, n_win), timeout=max(240, int(vdur * 3)))
         stage = "TTS voice generation"
-        await q.edit_message_text(f"🔄 [60%] 🎙️ {u['v']} (1.25x Speed) အပိုင်းလိုက် အသံနှင့် အချိန် ချိန်ညှိသွင်းနေပါသည်...{hint}", reply_markup=cancel_kb())
+        await q.edit_message_text(f"🔄 [60%] 🎙️ {u['v']} (1.25x Speed) အသံနှင့် Scene အချိန် ချိန်ညှိသွင်းနေပါသည်...{hint}", reply_markup=cancel_kb())
         seg_durs = await asyncio.wait_for(build_free_synced_voice(seg_scripts, u["v"], apath, uid, vdur), timeout=max(240, int(vdur * 3)))
         stage = "FFmpeg video/audio render"
         await q.edit_message_text(f"🔄 [85%] Ultra HD + Auto-Blur + Scene-Locked Frame Sync Render လုပ်နေပါသည်...{hint}", reply_markup=cancel_kb())
