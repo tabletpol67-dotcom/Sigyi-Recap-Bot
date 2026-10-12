@@ -1,5 +1,8 @@
-import os, re, sys, json, time, wave, base64, asyncio, subprocess, urllib.request, urllib.parse
+import os, re, sys, json, time, wave, base64, shutil, asyncio, subprocess, urllib.request, urllib.parse
 from pathlib import Path
+
+for pkg in ["edge-tts", "yt-dlp[default,curl-cffi]", "pytubefix", "btch-downloader", "gTTS"]:
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-U", pkg], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
@@ -16,11 +19,7 @@ SESSIONS, ACTIVE_TASKS = {}, {}
 VOICE_MAP = {"Thiha": "my-MM-ThihaNeural", "Nilar": "my-MM-NilarNeural"}
 VOICES = ["Thiha", "Nilar"]
 CHANNELS = [("@moviezone336", "https://t.me/moviezone336", "📢 Channel 1 Join ရန်"), ("@color6777", "https://t.me/color6777", "📢 Channel 2 Join ရန်"), ("@sigyi89", "https://t.me/sigyi89", "📢 Channel 3 Join ရန်")]
-# Keep the default path on Flash models. Pro models commonly have zero free-tier
-# quota and can make an otherwise healthy bot fail before the fallback is tried.
-MODELS = [x.strip().removeprefix("models/") for x in os.getenv(
-    "GEMINI_MODELS", "gemini-2.5-flash,gemini-2.0-flash"
-).split(",") if x.strip() and "flash" in x.lower()]
+MODELS = [x.strip().removeprefix("models/") for x in os.getenv("GEMINI_MODELS", "gemini-2.5-flash,gemini-2.0-flash").split(",") if x.strip() and "flash" in x.lower()]
 MODELS = MODELS or ["gemini-2.5-flash", "gemini-2.0-flash"]
 
 def try_run(fn, *a, **kw):
@@ -105,9 +104,10 @@ def key_menu_ui(u):
     return txt, InlineKeyboardMarkup(kb)
 
 def voice_menu_ui(u):
-    txt = "🎙️ မြန်မာအသံရွေးချယ်ရန်\nThiha (Male) သို့မဟုတ် Nilar (Female) ကို ရွေးပါ။\nအသံအမြန်နှုန်း: 1.25x (+25%)\n━━━━━━━━━━━━━━"
-    r1 = [InlineKeyboardButton("👨 Thiha (Male)", callback_data="v|Thiha")]
-    r2 = [InlineKeyboardButton("👩 Nilar (Female)", callback_data="v|Nilar")]
+    cur = u.get("v", "Thiha")
+    txt = f"🎙️ မြန်မာအသံရွေးချယ်ရန် (1.25x Speed)\nလက်ရှိအသံ - {'👨 Thiha (Male)' if cur == 'Thiha' else '👩 Nilar (Female)'}\n━━━━━━━━━━━━━━"
+    r1 = [InlineKeyboardButton(f"{'🟢' if cur == 'Thiha' else '⚪'} 👨 Thiha (Male)", callback_data="v|Thiha")]
+    r2 = [InlineKeyboardButton(f"{'🟢' if cur == 'Nilar' else '⚪'} 👩 Nilar (Female)", callback_data="v|Nilar")]
     r3 = [InlineKeyboardButton("🔙 Dashboard သို့ ပြန်သွားရန်", callback_data="m|dash")]
     return txt, InlineKeyboardMarkup([r1, r2, r3])
 
@@ -167,39 +167,18 @@ def find_mp4(obj):
     return None
 
 def yt_dlp_download(url, vpath, ua):
-    """Primary downloader for TikTok and YouTube, with bounded retries.
-    Third-party web APIs are fallback-only because they frequently rate-limit.
-    """
     base = vpath[:-4] + "_ydl" if vpath.lower().endswith(".mp4") else vpath + "_ydl"
     configs = [{}]
     low = url.lower()
     if "tiktok.com" in low:
-        configs = [
-            {"extractor_args": {"tiktok": {"app_name": "musically"}}},
-            {"extractor_args": {"tiktok": {"app_name": "trill"}}},
-            {},
-        ]
+        configs = [{"extractor_args": {"tiktok": {"app_name": "musically"}}}, {"extractor_args": {"tiktok": {"app_name": "trill"}}}, {}]
     elif "youtu" in low:
-        configs = [
-            {"extractor_args": {"youtube": {"player_client": ["android_vr"]}}},
-            {"extractor_args": {"youtube": {"player_client": ["ios"]}}},
-            {},
-        ]
+        configs = [{"extractor_args": {"youtube": {"player_client": ["android_vr"]}}}, {"extractor_args": {"youtube": {"player_client": ["ios"]}}}, {}]
     for i, extra in enumerate(configs):
         outbase = f"{base}{i}"
         for old in [x for x in os.listdir(".") if x.startswith(outbase)]:
             try_run(os.remove, old)
-        opts = {
-            "format": "bv*[ext=mp4][height<=720]+ba[ext=m4a]/b[ext=mp4][height<=720]/b[ext=mp4]/b",
-            "merge_output_format": "mp4",
-            "outtmpl": f"{outbase}.%(ext)s",
-            "quiet": True, "no_warnings": True, "noplaylist": True,
-            "nocheckcertificate": True, "retries": 3, "fragment_retries": 3,
-            "extractor_retries": 3, "socket_timeout": 25,
-            "concurrent_fragment_downloads": 1, "force_ipv4": True,
-            "http_headers": {"User-Agent": ua, "Referer": "https://www.tiktok.com/"},
-            **extra,
-        }
+        opts = {"format": "bv*[ext=mp4][height<=720]+ba[ext=m4a]/b[ext=mp4][height<=720]/b[ext=mp4]/b", "merge_output_format": "mp4", "outtmpl": f"{outbase}.%(ext)s", "quiet": True, "no_warnings": True, "noplaylist": True, "nocheckcertificate": True, "retries": 3, "fragment_retries": 3, "extractor_retries": 3, "socket_timeout": 25, "concurrent_fragment_downloads": 1, "force_ipv4": True, "http_headers": {"User-Agent": ua, "Referer": "https://www.tiktok.com/"}, **extra}
         try_run(lambda: yt_dlp.YoutubeDL(opts).download([url]))
         candidates = [x for x in os.listdir(".") if x.startswith(outbase + ".") and is_valid_video(x)]
         if candidates:
@@ -215,45 +194,10 @@ def dl_vid(url, vpath):
     ua_m = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
     ua_d = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
     try_run(os.remove, vpath)
-    # Use the maintained extractor before custom APIs for the platforms it
-    # supports. This also follows vt.tiktok.com and youtu.be redirects.
     if any(host in url.lower() for host in ["tiktok.com", "youtu.be", "youtube.com"]):
         if yt_dlp_download(url, vpath, ua_d):
             return
     if "tiktok.com" in url:
-        # Resolve vt.tiktok.com short URLs with yt-dlp first. Third-party JSON
-        # download APIs are frequently rate-limited or return stale URLs, while
-        # yt-dlp follows the redirect and validates the media itself.
-        tt_base = vpath.replace(".mp4", "_tt")
-        tt_configs = [
-            {"extractor_args": {"tiktok": {"app_name": "musically"}}},
-            {"extractor_args": {"tiktok": {"app_name": "trill"}}},
-            {},
-        ]
-        for ti, extra in enumerate(tt_configs):
-            for old in [x for x in os.listdir(".") if x.startswith(tt_base)]:
-                try_run(os.remove, old)
-            opts_tt = {
-                "format": "bv*[ext=mp4][height<=720]+ba[ext=m4a]/b[ext=mp4][height<=720]/b[ext=mp4]/b",
-                "merge_output_format": "mp4",
-                "outtmpl": f"{tt_base}{ti}.%(ext)s",
-                "quiet": True,
-                "no_warnings": True,
-                "noplaylist": True,
-                "nocheckcertificate": True,
-                "retries": 3,
-                "fragment_retries": 3,
-                "socket_timeout": 25,
-                "concurrent_fragment_downloads": 1,
-                "force_ipv4": True,
-                "http_headers": {"User-Agent": ua_m, "Referer": "https://www.tiktok.com/"},
-                **extra,
-            }
-            try_run(lambda: yt_dlp.YoutubeDL(opts_tt).download([url]))
-            for candidate in [x for x in os.listdir(".") if x.startswith(f"{tt_base}{ti}.") and is_valid_video(x)]:
-                try_run(os.remove, vpath)
-                os.rename(candidate, vpath)
-                return
         api1 = f"https://www.tikwm.com/api/?url={urllib.parse.quote(url)}"
         d1 = (try_run(lambda: json.loads(urllib.request.urlopen(urllib.request.Request(api1, headers={"User-Agent": ua_m}), timeout=15).read().decode())) or {}).get("data", {})
         for fk in ["play", "wmplay", "hdplay"]:
@@ -291,15 +235,6 @@ def dl_vid(url, vpath):
                 dl_u = (try_run(lambda: json.loads(urllib.request.urlopen(urllib.request.Request(f"https://p.oceansaver.in/ajax/progress.php?id={tid}", headers={"User-Agent": ua_d}), timeout=10).read().decode())) or {}).get("download_url")
                 if dl_u and save_stream_url(dl_u, vpath, ua_d):
                     return
-        tb = vpath.replace(".mp4", "_yt")
-        for ycfg in [{"player_client": ["android_vr"], "player_skip": ["webpage", "configs"]}, {"player_client": ["ios"], "player_skip": ["webpage", "configs"]}, {"player_client": ["tv_embedded"], "player_skip": ["webpage", "configs"]}, {"player_client": ["android_vr", "tv_downgraded"]}]:
-            for f in [x for x in os.listdir(".") if x.startswith(tb)]:
-                try_run(os.remove, f)
-            opts = {"format": "b[ext=mp4]/bv*+ba/b/best", "merge_output_format": "mp4", "outtmpl": f"{tb}.%(ext)s", "quiet": True, "noplaylist": True, "nocheckcertificate": True, "cachedir": False, "extractor_args": {"youtube": ycfg}}
-            try_run(lambda: yt_dlp.YoutubeDL(opts).download([clean_yt]))
-            for f in [x for x in os.listdir(".") if x.startswith(tb) and is_valid_video(x)]:
-                os.rename(f, vpath)
-                return
         from pytubefix import YouTube
         for cli in ["ANDROID_VR", "IOS", "WEB_EMBED", "MWEB", "TV"]:
             yt = try_run(lambda: YouTube(clean_yt, client=cli))
@@ -318,14 +253,6 @@ def dl_vid(url, vpath):
     dl_u = try_run(lambda: find_mp4(asyncio.run(btch_downloader.xiaohongshu(url) if "xhs" in url or "xiaohongshu" in url else (btch_downloader.ttdl(url) if "tiktok" in url else (btch_downloader.youtube(url) if "youtu" in url else btch_downloader.aio(url))))))
     if dl_u and save_stream_url(dl_u, vpath, ua_d):
         return
-    tb2 = vpath.replace(".mp4", "_g")
-    for f in [x for x in os.listdir(".") if x.startswith(tb2)]:
-        try_run(os.remove, f)
-    opts2 = {"format": "b[ext=mp4]/bv*+ba/b/best", "merge_output_format": "mp4", "outtmpl": f"{tb2}.%(ext)s", "quiet": True, "noplaylist": True, "nocheckcertificate": True, "cachedir": False, "http_headers": {"User-Agent": ua_m}}
-    try_run(lambda: yt_dlp.YoutubeDL(opts2).download([url]))
-    for f in [x for x in os.listdir(".") if x.startswith(tb2) and is_valid_video(x)]:
-        os.rename(f, vpath)
-        return
     raise Exception("Video Link ဒေါင်းယူ၍ မရပါ။ (Bot အလုပ်မလုပ်ပါက /start နှိပ်ပါ)")
 
 def clean_mm_text(t):
@@ -342,8 +269,6 @@ def get_generate_models(client):
             if not name or (actions and not any("generatecontent" in a for a in actions)):
                 continue
             low = name.lower()
-            # Free-tier safe policy: discover Flash models only. In particular,
-            # never auto-promote to a Pro model whose quota may be zero.
             if not any(term in low for term in ("embedding", "tts", "image", "veo", "aqa")) and "flash" in low:
                 discovered.append(name)
     except Exception:
@@ -362,14 +287,12 @@ def _try_models_with_file(client, model_candidates, uf, p, uid, k_i):
                 return res.text, None
         except Exception as me:
             last_err = me
-            # Try the next Flash model on quota/rate-limit and transient auth
-            # errors instead of aborting the whole model search immediately.
             if any(w in str(me).upper() for w in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "API_KEY", "PERMISSION", "403"]):
                 continue
     return "", last_err
 
 def ai_frame_audio_translate(vpath, sm_v, uid, vdur, n_win):
-    subprocess.run(["ffmpeg", "-y", "-threads", "2", "-i", vpath, "-vf", "fps=1,scale=280:-2", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "35", "-c:a", "aac", "-ac", "1", "-ar", "16000", "-b:a", "28k", sm_v], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+    subprocess.run(["ffmpeg", "-y", "-threads", "2", "-i", vpath, "-t", f"{vdur:.2f}", "-vf", "fps=1,scale=280:-2", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "35", "-c:a", "aac", "-ac", "1", "-ar", "16000", "-b:a", "28k", sm_v], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=40)
     up_file = sm_v if (os.path.exists(sm_v) and os.path.getsize(sm_v) > 1000) else vpath
     u = get_u(uid)
     keys = u.get("keys", [])
@@ -377,7 +300,7 @@ def ai_frame_audio_translate(vpath, sm_v, uid, vdur, n_win):
         raise Exception("API Key မရှိပါ။ Key အရင်ထည့်ပေးပါ။")
     start_idx = u.get("k_idx", 0) % len(keys)
     w_dur = vdur / n_win
-    chars_w = max(65, int((w_dur / 0.85) * 13.2))
+    chars_w = max(65, int((w_dur / 0.85) * 13.0))
     win_desc = "၊ ".join([f"အပိုင်း {i+1} ({int(i*w_dur)}s မှ {int((i+1)*w_dur)}s)" for i in range(n_win)])
     p = f"ဒီ Video ဖိုင်ရဲ့ ရုပ်ပုံ (Frames) နဲ့ မူရင်းအသံ (Audio) နှစ်ခုလုံးကို သေချာကြည့်ရှုနားထောင်ပြီး အောက်ပါ အချိန်အပိုင်းအခြား ({n_win}) ပိုင်းအတိုင်း အတိအကျ ခွဲ၍ အပိုအလိုမရှိဘဲ Burmese Professional Movie Recap စကားပြောပုံစံဖြင့် ဘာသာပြန်ပေးပါ - {win_desc}\n\n"
     p += "အတိအကျ လိုက်နာရမည့် ဥပမာ အရေးအသားပုံစံ -\n"
@@ -407,9 +330,8 @@ def ai_frame_audio_translate(vpath, sm_v, uid, vdur, n_win):
             break
     if not raw_txt:
         err_text = str(last_err or "Unknown Gemini API error")
-        upper = err_text.upper()
-        if any(w in upper for w in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "LIMIT: 0"]):
-            raise Exception("Gemini API quota ပြည့်နေပါသည် (သို့မဟုတ် ဒီ API key အတွက် free-tier quota = 0 ဖြစ်နေပါသည်)။ Google AI Studio တွင် API key အသစ်သုံးပါ၊ သို့မဟုတ် billing/quota ကို စစ်ပြီး key အများကြီးထည့်ပြီး ပြန်စမ်းပါ။")
+        if any(w in err_text.upper() for w in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "LIMIT: 0"]):
+            raise Exception("Gemini API quota ပြည့်နေပါသည်။ Google AI Studio မှ Key အသစ်ထည့်ပြီး ပြန်စမ်းပေးပါ။")
         raise Exception(f"Gemini API Error: {err_text[:600]}")
     parts = [clean_mm_text(x) for x in raw_txt.split("|||") if len(clean_mm_text(x)) > 5]
     if len(parts) != n_win:
@@ -456,65 +378,63 @@ def _google_tts_fallback(text, output_mp3, uid, seg_index):
         for path in chunk_paths + [list_path]:
             try_run(os.remove, path)
 
-async def build_free_synced_voice(seg_scripts, voice_key, out_a, uid):
-    """Build one clean narration timeline and return its post-processed segment durations.
-
-    The important rule is: no AAC is created until all segments have been cleaned,
-    resampled, and joined as PCM. This prevents independent encoder delay at every
-    scene boundary and makes later timeline fitting deterministic.
-    """
+async def build_free_synced_voice(seg_scripts, voice_key, out_a, uid, vdur):
+    """Generate clean 1.25x narration per scene and pace each segment so video never speeds up."""
     voice = VOICE_MAP.get(voice_key, VOICE_MAP["Thiha"])
+    n_win = max(1, len(seg_scripts))
+    w_dur = vdur / n_win
+    slot_target = (vdur / 0.85) / n_win
     work = f"tts_{uid}_{int(time.time() * 1000)}"
     os.makedirs(work, exist_ok=True)
-    wavs, raw_files, seg_durs = [], [], []
+    wavs, seg_durs = [], []
     edge_ok = True
     try:
         for i, script in enumerate(seg_scripts):
             text = clean_mm_text(script) or "အဲ့ဒီနောက်မှာတော့"
             raw = os.path.join(work, f"raw_{i}.mp3")
-            wav = os.path.join(work, f"seg_{i}.wav")
-            raw_files.append(raw); wavs.append(wav)
+            cw = os.path.join(work, f"cw_{i}.wav")
+            fw = os.path.join(work, f"fw_{i}.wav")
+            used_fallback = False
             if edge_ok:
-                for attempt in range(4):
+                for attempt in range(3):
+                    try_run(os.remove, raw)
                     try:
-                        try_run(os.remove, raw)
-                        comm = edge_tts.Communicate(text=text, voice=voice, rate="+25%", volume="+0%", pitch="+0Hz")
-                        await asyncio.wait_for(comm.save(raw), timeout=45)
+                        await asyncio.wait_for(edge_tts.Communicate(text=text, voice=voice, rate="+25%").save(raw), timeout=20)
                     except Exception:
-                        pass
+                        try_run(lambda: subprocess.run([sys.executable, "-m", "edge_tts", "--voice", voice, "--rate=+25%", "--text", text, "--write-media", raw], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20))
                     if is_valid_audio(raw):
                         break
-                    if attempt < 3:
-                        await asyncio.sleep(1.5 * (attempt + 1))
+                    await asyncio.sleep(0.8)
                 if not is_valid_audio(raw):
                     edge_ok = False
             if not is_valid_audio(raw):
+                used_fallback = True
                 if not await asyncio.to_thread(_google_tts_fallback, text, raw, uid, i):
-                    raise RuntimeError(f"TTS failed at segment {i + 1}")
-            # All voices use one deterministic sample rate/channel layout. Silence is
-            # removed only at the ends; internal pauses remain natural.
-            af = "silenceremove=start_periods=1:start_duration=0.03:start_threshold=-48dB:stop_periods=1:stop_duration=0.03:stop_threshold=-48dB,highpass=f=70,loudnorm=I=-16:TP=-1.5:LRA=11,aresample=24000,asetpts=PTS-STARTPTS"
-            if not edge_ok:
-                af = "atempo=1.25," + af
-            r = await asyncio.to_thread(subprocess.run, ["ffmpeg", "-y", "-i", raw, "-af", af, "-ac", "1", "-ar", "24000", "-c:a", "pcm_s16le", wav], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=90)
-            if r.returncode != 0 or not is_valid_audio(wav):
-                raise RuntimeError(f"Audio cleanup failed at segment {i + 1}: {r.stderr[-220:]}")
-            seg_durs.append(max(0.05, get_dur(wav)))
-        if not wavs or len(seg_durs) != len(seg_scripts):
-            raise RuntimeError("No usable narration segments were produced")
+                    raise RuntimeError(f"TTS အသံထုတ်မရပါ (Segment {i + 1})")
+            spd_f = ("asetrate=24000*0.88,aresample=24000,atempo=1.42," if voice_key == "Thiha" else "atempo=1.25,") if used_fallback else ""
+            # Use areverse to trim only leading and trailing silence without cutting internal pauses
+            af = f"silenceremove=start_periods=1:start_duration=0.02:start_threshold=-45dB,areverse,silenceremove=start_periods=1:start_duration=0.02:start_threshold=-45dB,areverse,{spd_f}highpass=f=80,volume=2.4,alimiter=limit=0.96,aresample=24000,asetpts=PTS-STARTPTS"
+            r = await asyncio.to_thread(subprocess.run, ["ffmpeg", "-y", "-i", raw, "-af", af, "-ac", "1", "-ar", "24000", cw], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
+            if r.returncode != 0 or not is_valid_audio(cw):
+                r = await asyncio.to_thread(subprocess.run, ["ffmpeg", "-y", "-i", raw, "-af", "atempo=1.25", "-ac", "1", "-ar", "24000", cw], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
+            if not is_valid_audio(cw):
+                raise RuntimeError(f"Audio conversion failed at segment {i + 1}")
+            raw_d = max(0.6, get_dur(cw))
+            tempo_adj = max(0.88, min(1.15, raw_d / max(0.6, slot_target)))
+            min_seg_d = w_dur * 1.02
+            af_fit = f"atempo={tempo_adj:.4f},apad=whole_dur={min_seg_d:.3f},asetpts=PTS-STARTPTS"
+            await asyncio.to_thread(subprocess.run, ["ffmpeg", "-y", "-i", cw, "-af", af_fit, "-ac", "1", "-ar", "24000", fw], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
+            use_w = fw if is_valid_audio(fw) else cw
+            wavs.append(use_w)
+            seg_durs.append(max(0.6, get_dur(use_w)))
         list_f = os.path.join(work, "concat.txt")
         Path(list_f).write_text("".join("file '" + os.path.abspath(w).replace("'", "'\\''") + "'\n" for w in wavs), encoding="utf-8")
-        joined = os.path.join(work, "joined.wav")
-        r = await asyncio.to_thread(subprocess.run, ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_f, "-c:a", "pcm_s16le", "-ar", "24000", "-ac", "1", joined], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=150)
-        if r.returncode != 0 or not is_valid_audio(joined):
-            raise RuntimeError("Narration concat failed: " + r.stderr[-260:])
-        r = await asyncio.to_thread(subprocess.run, ["ffmpeg", "-y", "-i", joined, "-map_metadata", "-1", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", out_a], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=150)
+        r = await asyncio.to_thread(subprocess.run, ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_f, "-c:a", "aac", "-b:a", "160k", out_a], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
         if r.returncode != 0 or not is_valid_audio(out_a):
-            raise RuntimeError("Narration encode failed: " + r.stderr[-260:])
+            raise RuntimeError("Narration audio concat failed")
         return seg_durs
     finally:
-        try_run(__import__('shutil').rmtree, work, True)
-
+        try_run(shutil.rmtree, work, True)
 
 def detect_sub_band(iv, vdur, is_fr, uid):
     raw_f = f"subdet_{uid}.raw"
@@ -553,64 +473,46 @@ def get_dur(p):
     return duration
 
 def build_piecewise_pts(vdur, seg_durs):
-    """Map equal source-video windows to the exact post-TTS audio boundaries."""
-    if not seg_durs:
-        return "setpts=PTS-STARTPTS"
-    n=len(seg_durs); source_step=float(vdur)/n; total=sum(max(0.05,float(x)) for x in seg_durs)
-    scale=float(vdur)/total
-    targets=[]
-    acc=0.0
-    for d in seg_durs:
-        targets.append(acc*scale); acc += max(0.05,float(d))
-    expr=f"{targets[-1]:.6f}+(T-{(n-1)*source_step:.6f})*{scale:.8f}"
-    for i in range(n-2,-1,-1):
-        slope=(max(0.05,float(seg_durs[i]))*scale)/source_step
-        expr=f"if(lt(T,{(i+1)*source_step:.6f}),{targets[i]:.6f}+(T-{i*source_step:.6f})*{slope:.8f},{expr})"
-    return f"settb=AVTB,setpts='({expr})/TB',fps=30,tpad=stop_mode=clone:stop_duration=1,trim=duration={float(vdur):.6f},setpts=PTS-STARTPTS"
-
-def _atempo_chain(ratio):
-    ratio=max(0.1,min(20.0,float(ratio)))
-    parts=[]
-    while ratio>2.0: parts.append("atempo=2.0"); ratio/=2.0
-    while ratio<0.5: parts.append("atempo=0.5"); ratio/=0.5
-    parts.append(f"atempo={ratio:.8f}")
-    return ",".join(parts)
+    n, w_d = len(seg_durs), max(0.5, vdur / max(1, len(seg_durs)))
+    ts = [i * w_d for i in range(n)]
+    ss = [sum(seg_durs[:i]) for i in range(n)]
+    sl = [d / w_d for d in seg_durs]
+    ex = f"{ss[-1]:.4f}+(T-{ts[-1]:.4f})*{sl[-1]:.4f}"
+    for i in range(n - 2, -1, -1):
+        ex = f"if(lt(T,{ts[i+1]:.4f}),{ss[i]:.4f}+(T-{ts[i]:.4f})*{sl[i]:.4f},{ex})"
+    return f"trim=duration={vdur:.3f},setpts=PTS-STARTPTS,setpts='({ex})/TB',fps=30"
 
 def edit_vid(iv, ia, ov, u, uid, vdur, seg_durs):
-    """Render with a single master clock and validate both streams before returning."""
-    source_dur=get_dur(iv); target=max(1.0,float(vdur)); audio_dur=max(0.1,get_dur(ia))
-    # Fit narration once; boundaries are represented by build_piecewise_pts.
-    audio_fit=_atempo_chain(audio_dur/target)
-    is_fr=u.get("layout","frame")=="frame"; fl=",hflip" if u.get("f") else ""
-    adj="crop=iw*0.92:ih*0.92:iw*0.04:ih*0.04,eq=contrast=1.08:brightness=0.02:saturation=1.14:gamma=1.03,hue=h=3,unsharp=3:3:0.65:3:3:0.0"
-    video_clock=build_piecewise_pts(target,seg_durs)
-    b_map={"low":(950,86),"mid":(880,86),"high":(790,86)} if is_fr else {"low":(1040,92),"mid":(940,92),"high":(830,92)}
-    by,bh=(detect_sub_band(iv,target,is_fr,uid) if u.get("blur")=="auto" else b_map.get(u.get("blur"),(950,86)))
-    by=(int(by)//2)*2; bh=max(64,(int(bh)//2)*2)
-    kbps=min(3200,max(1000,int((42*8192)/target)-160))
-    inputs=["-i",iv,"-i",ia]
-    fc=f"[0:v]{video_clock}{fl}[v0];"
-    if is_fr:
-        fc+=f"[v0]split=2[bgi][fgi];[bgi]scale=180:320:force_original_aspect_ratio=increase,crop=180:320,gblur=sigma=14,eq=brightness=-0.07,scale=720:1280[bg];[fgi]{adj},scale=720:820:force_original_aspect_ratio=increase:flags=lanczos,crop=720:820[fg];[bg][fg]overlay=0:230[v1]"
-    else:
-        fc+=f"[v0]{adj},scale=720:1280:force_original_aspect_ratio=increase:flags=lanczos,crop=720:1280[v1]"
-    cur="[v1]"
-    if u.get("blur")!="off":
-        fc+=f";{cur}split=2[m1][m2];[m2]crop=640:{bh}:40:{by},gblur=sigma=26[bst];[m1][bst]overlay=40:{by}[v2]"; cur="[v2]"
-    logo=f"logo_{uid}.jpg"
-    if u.get("logo") and os.path.exists(logo):
-        inputs += ["-i",logo]; ly=165 if is_fr else 80
-        fc+=f";[2:v]scale=110:110[lg];{cur}[lg]overlay=12:{ly}[v3]"; cur="[v3]"
-    fc+=f";{cur}format=yuv420p[vout]"
-    audio_filter=f"asetpts=PTS-STARTPTS,{audio_fit},aresample=async=1:first_pts=0,atrim=duration={target:.6f},asetpts=PTS-STARTPTS"
-    cmd=["ffmpeg","-y","-threads","2"]+inputs+["-map_metadata","-1","-map_chapters","-1","-filter_complex",fc,"-map","[vout]","-map","1:a:0","-fps_mode","cfr","-r","30","-c:v","libx264","-preset","superfast","-crf","19","-maxrate",f"{kbps}k","-bufsize",f"{kbps*2}k","-af",audio_filter,"-c:a","aac","-b:a","160k","-t",f"{target:.3f}","-avoid_negative_ts","make_zero","-movflags","+faststart","-fs","47M",ov]
-    r=subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,timeout=max(600,int(target*8)))
-    if r.returncode!=0 or not is_valid_video(ov):
-        raise RuntimeError("Render failed: "+r.stderr[-700:])
-    final=get_dur(ov)
-    if abs(final-target)>0.8:
-        raise RuntimeError(f"Final duration validation failed: expected {target:.2f}s, got {final:.2f}s")
-
+    out_dur = max(get_dur(ia), 1.0)
+    is_fr, fl = (u.get("layout", "frame") == "frame"), (",hflip" if u.get("f") else "")
+    adj = "crop=iw*0.92:ih*0.92:iw*0.04:ih*0.04,eq=contrast=1.08:brightness=0.02:saturation=1.14:gamma=1.03,hue=h=3,unsharp=3:3:0.65:3:3:0.0"
+    pw_s = build_piecewise_pts(vdur, seg_durs)
+    un_s = f"trim=duration={vdur:.3f},setpts={out_dur/max(vdur,1.0):.4f}*(PTS-STARTPTS),fps=30"
+    b_map = {"low": (950, 86), "mid": (880, 86), "high": (790, 86)} if is_fr else {"low": (1040, 92), "mid": (940, 92), "high": (830, 92)}
+    by, bh = detect_sub_band(iv, vdur, is_fr, uid) if u.get("blur") == "auto" else b_map.get(u.get("blur"), (950, 86))
+    by, bh = (int(by) // 2) * 2, max(64, (int(bh) // 2) * 2)
+    kbps = min(3200, max(1000, int((42 * 8192) / out_dur) - 160))
+    last_err = ""
+    for sync_f in [pw_s, un_s]:
+        try_run(os.remove, ov)
+        fc = f"[0:v]{sync_f}{fl}[v0];" + (f"[v0]split=2[bgi][fgi];[bgi]scale=180:320:force_original_aspect_ratio=increase,crop=180:320,gblur=sigma=14,eq=brightness=-0.07,scale=720:1280[bg];[fgi]{adj},scale=720:820:force_original_aspect_ratio=increase:flags=lanczos,crop=720:820[fg];[bg][fg]overlay=0:230[v1]" if is_fr else f"[v0]{adj},scale=720:1280:force_original_aspect_ratio=increase:flags=lanczos,crop=720:1280[v1]")
+        cur = "[v1]"
+        if u.get("blur") != "off":
+            fc += f";{cur}split=2[m1][m2];[m2]crop=640:{bh}:40:{by},gblur=sigma=26[bst];[m1][bst]overlay=40:{by}[v2]"
+            cur = "[v2]"
+        inputs, logo_p = ["-i", iv, "-i", ia], f"logo_{uid}.jpg"
+        if u.get("logo") and os.path.exists(logo_p):
+            inputs.extend(["-i", logo_p])
+            ly = 165 if is_fr else 80
+            fc += f";[2:v]scale=110:110[lg];{cur}[lg]overlay=12:{ly}[v3]"
+            cur = "[v3]"
+        fc += f";{cur}format=yuv420p[vout]"
+        c = ["ffmpeg", "-y", "-threads", "2"] + inputs + ["-map_metadata", "-1", "-map_chapters", "-1", "-filter_complex", fc, "-map", "[vout]", "-map", "1:a:0", "-c:v", "libx264", "-preset", "superfast", "-crf", "19", "-maxrate", f"{kbps}k", "-bufsize", f"{kbps*2}k", "-c:a", "copy", "-t", f"{out_dur:.2f}", "-fs", "47M", ov]
+        r = subprocess.run(c, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=max(300, int(out_dur * 6)))
+        if r.returncode == 0 and is_valid_video(ov):
+            return
+        last_err = r.stderr[-500:]
+    raise RuntimeError(f"Render Error: {last_err}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -673,8 +575,8 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         SESSIONS[uid] = vpath
         txt, kb = dash_ui(u, uid)
-        btn = InlineKeyboardButton("🚀 START SHORTS RENDER (အများဆုံး 3 မိနစ်)", callback_data="r|go")
-        await msg.edit_text("🎬 Video ရပြီ! TikTok / YouTube Shorts အတွက် Render စတင်ရန် အောက်ကခလုတ်ကို နှိပ်ပါ။\n📌 Output သည် အများဆုံး 3 မိနစ်သာ ဖြစ်ပါမည်။\n\n" + txt, reply_markup=InlineKeyboardMarkup(list(kb.inline_keyboard) + [[btn]]))
+        btn = InlineKeyboardButton(f"🚀 START RENDER ({u['v']} 1.25x | Ultra HD)", callback_data="r|go")
+        await msg.edit_text("🎬 Video ရပြီ! စတင်ရန် START RENDER ကို နှိပ်ပါ -\n\n" + txt, reply_markup=InlineKeyboardMarkup(list(kb.inline_keyboard) + [[btn]]))
     except Exception as e:
         err_m = str(e).strip() or type(e).__name__
         await msg.edit_text(f"❌ Download Error: {err_m}\n\n💡 Bot အလုပ်မလုပ်ပါက /start ကို နှိပ်ပါ။")
@@ -682,47 +584,40 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def run_render_job(q, context, uid):
     u, vpath = get_u(uid), SESSIONS.get(uid)
     sm_v, apath, opath = f"sm_{uid}.mp4", f"aud_{uid}.m4a", f"out_{uid}.mp4"
-    hint="\n\n💡 ရပ်နေပါက /start နှိပ်ပြီး video ပြန်ပို့ပါ"
-    stage="စတင်နေပါသည်"
+    hint = "\n\n💡 ရပ်နေပါက /start နှိပ်ပြီး video ပြန်ပို့ပါ"
+    stage = "စတင်နေပါသည်"
     try:
         if not vpath or not is_valid_video(vpath):
             raise RuntimeError("Input video မမှန်ကန်ပါ")
-        # Shorts-only output: cap processing to the first 180 seconds.
-        # Keep the existing narration/TTS/audio processing unchanged.
-        source_duration=max(1.0,get_dur(vpath))
-        vdur=min(source_duration,180.0)
-        n_win=3 if vdur<=28 else (4 if vdur<=60 else (5 if vdur<=110 else 6))
-        stage="Gemini scene analysis"
-        await q.edit_message_text(f"🔄 [30%] Video ကို {n_win} ပိုင်းခွဲပြီး scene analysis လုပ်နေပါသည်...{hint}",reply_markup=cancel_kb())
-        seg_scripts=await asyncio.wait_for(asyncio.to_thread(ai_frame_audio_translate,vpath,sm_v,uid,vdur,n_win),timeout=max(300,int(vdur*3)))
-        if len(seg_scripts)!=n_win: raise RuntimeError("AI က narration segments မပြည့်စုံပါ")
-        stage="TTS voice generation"
-        await q.edit_message_text(f"🔄 [60%] 🎙️ {u['v']} voice ကို clean timeline အဖြစ် တည်ဆောက်နေပါသည်...{hint}",reply_markup=cancel_kb())
-        raw_durs=await asyncio.wait_for(build_free_synced_voice(seg_scripts,u["v"],apath,uid),timeout=max(420,int(vdur*4)))
-        if not raw_durs or not is_valid_audio(apath): raise RuntimeError("Narration audio မမှန်ကန်ပါ")
-        stage="FFmpeg video/audio render"
-        await q.edit_message_text(f"🔄 [82%] Master clock နဲ့ video/audio sync လုပ်နေပါသည်...{hint}",reply_markup=cancel_kb())
-        # uid is required by edit_vid for per-user logo lookup; the previous
-        # call omitted it and shifted arguments, causing every render to fail.
-        await asyncio.wait_for(asyncio.to_thread(edit_vid,vpath,apath,opath,u,uid,vdur,raw_durs),timeout=max(900,int(vdur*8)))
-        stage="Output validation"
-        final=get_dur(opath)
-        if abs(final-vdur)>0.8: raise RuntimeError(f"Output duration mismatch: {vdur:.2f}s → {final:.2f}s")
-        await q.edit_message_text("📤 [98%] Telegram သို့ တင်ပို့နေပါသည်..." )
-        with open(opath,"rb") as vf:
-            await context.bot.send_video(uid,vf,caption="Powered by SiGyi Ai Studio",read_timeout=300,write_timeout=300)
+        source_duration = max(1.0, get_dur(vpath))
+        vdur = min(source_duration, 180.0)
+        n_win = 3 if vdur <= 28 else (4 if vdur <= 60 else (5 if vdur <= 110 else 6))
+        stage = "Gemini scene analysis"
+        await q.edit_message_text(f"🔄 [30%] Video Frame + မူရင်းအသံကို အပိုင်း ({n_win}) ပိုင်းခွဲ၍ အတိအကျ ဘာသာပြန်နေပါသည်...{hint}", reply_markup=cancel_kb())
+        seg_scripts = await asyncio.wait_for(asyncio.to_thread(ai_frame_audio_translate, vpath, sm_v, uid, vdur, n_win), timeout=max(240, int(vdur * 3)))
+        stage = "TTS voice generation"
+        await q.edit_message_text(f"🔄 [60%] 🎙️ {u['v']} (1.25x Speed) အပိုင်းလိုက် အသံနှင့် အချိန် ချိန်ညှိသွင်းနေပါသည်...{hint}", reply_markup=cancel_kb())
+        seg_durs = await asyncio.wait_for(build_free_synced_voice(seg_scripts, u["v"], apath, uid, vdur), timeout=max(240, int(vdur * 3)))
+        stage = "FFmpeg video/audio render"
+        await q.edit_message_text(f"🔄 [85%] Ultra HD + Auto-Blur + Scene-Locked Frame Sync Render လုပ်နေပါသည်...{hint}", reply_markup=cancel_kb())
+        await asyncio.wait_for(asyncio.to_thread(edit_vid, vpath, apath, opath, u, uid, vdur, seg_durs), timeout=max(360, int(vdur * 6)))
+        await q.edit_message_text("📤 [98%] Ultra HD Video ပို့ပေးနေပါတယ်...")
+        with open(opath, "rb") as vf:
+            await context.bot.send_video(uid, vf, caption="Powered by SiGyi Ai Studio", read_timeout=300, write_timeout=300)
         await q.delete_message()
-    except asyncio.CancelledError: pass
+    except asyncio.CancelledError:
+        pass
     except asyncio.TimeoutError:
-        try_run(lambda: asyncio.create_task(q.edit_message_text(f"❌ {stage} အဆင့်မှာ အချိန်ကျော်သွားပါတယ်။ Video ရှည်လွန်းခြင်း သို့မဟုတ် API/server နှေးခြင်း ဖြစ်နိုင်ပါတယ်။\n\n💡 Video တိုတစ်ခုနဲ့ ပြန်စမ်းပါ၊ သို့မဟုတ် /start နှိပ်ပြီး ပြန်စပါ")))
+        try_run(lambda: asyncio.create_task(q.edit_message_text(f"❌ {stage} အဆင့်မှာ အချိန်ကျော်သွားပါတယ်။ /start နှိပ်ပြီး ပြန်စမ်းပေးပါ။")))
     except Exception as e:
-        err=str(e).strip() or type(e).__name__
-        try_run(lambda: asyncio.create_task(q.edit_message_text(f"❌ {stage} Error: {err[:900]}\n\n💡 /start နှိပ်ပြီး ပြန်စမ်းပါ")))
+        err = str(e).strip() or type(e).__name__
+        try_run(lambda: asyncio.create_task(q.edit_message_text(f"❌ {stage} Error: {err[:800]}\n\n💡 /start နှိပ်ပြီး ပြန်စမ်းပါ")))
     finally:
-        ACTIVE_TASKS.pop(uid,None); SESSIONS.pop(uid,None)
-        for p in [vpath,sm_v,apath,opath]:
-            if p and os.path.exists(p): try_run(os.remove,p)
-
+        ACTIVE_TASKS.pop(uid, None)
+        SESSIONS.pop(uid, None)
+        for p in [vpath, sm_v, apath, opath]:
+            if p and os.path.exists(p):
+                try_run(os.remove, p)
 
 async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -777,7 +672,7 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         txt, kb = dash_ui(u_new, uid)
         rows = list(kb.inline_keyboard)
         if uid in SESSIONS and os.path.exists(SESSIONS[uid]):
-            rows.append([InlineKeyboardButton("🚀 START SHORTS RENDER (အများဆုံး 3 မိနစ်)", callback_data="r|go")])
+            rows.append([InlineKeyboardButton(f"🚀 START RENDER ({u_new['v']} 1.25x | Ultra HD)", callback_data="r|go")])
         await q.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(rows))
         return
     if cat == "r" and act == "go":
