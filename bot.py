@@ -460,7 +460,7 @@ def _google_tts_fallback(text, output_mp3, uid, seg_index):
         for path in chunk_paths + [list_path]:
             try_run(os.remove, path)
 
-def _ pace_and_concat_segments(raw_seg_wavs, work, out_a, vdur):
+def _pace_and_concat_segments(raw_seg_wavs, work, out_a, vdur):
     n_win = max(1, len(raw_seg_wavs))
     w_dur = vdur / n_win
     slot_target = (vdur / 0.90) / n_win
