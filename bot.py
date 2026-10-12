@@ -1,4 +1,4 @@
-import os, re, sys, json, time, wave, base64, shutil, struct, asyncio, subprocess, urllib.request, urllib.parse
+import os, re, sys, json, time, wave, base64, shutil, asyncio, subprocess, urllib.request, urllib.parse
 from pathlib import Path
 
 for pkg in ["edge-tts", "yt-dlp[default,curl-cffi]", "pytubefix", "btch-downloader", "gTTS"]:
@@ -19,8 +19,13 @@ SESSIONS, ACTIVE_TASKS = {}, {}
 EDGE_MAP = {"Thiha": "my-MM-ThihaNeural", "Nilar": "my-MM-NilarNeural"}
 GEMINI_FALLBACK_MAP = {"Thiha": "Charon", "Nilar": "Zephyr"}
 VOICES = ["Thiha", "Nilar", "Zephyr", "Charon", "Kore", "Puck", "Fenrir"]
-CHANNELS = [("@moviezone336", "https://t.me/moviezone336", "📢 Channel 1 Join ရန်"), ("@color6777", "https://t.me/color6777", "📢 Channel 2 Join ရန်"), ("@sigyi89", "https://t.me/sigyi89", "📢 Channel 3 Join ရန်")]
-MODELS = [x.strip().removeprefix("models/") for x in os.getenv("GEMINI_MODELS", "gemini-2.5-flash,gemini-2.0-flash").split(",") if x.strip() and "flash" in x.lower()]
+CHANNELS = [
+    ("@moviezone336", "https://t.me/moviezone336", "📢 Channel 1 Join ရန်"),
+    ("@color6777", "https://t.me/color6777", "📢 Channel 2 Join ရန်"),
+    ("@sigyi89", "https://t.me/sigyi89", "📢 Channel 3 Join ရန်")
+]
+RAW_MODELS = os.getenv("GEMINI_MODELS", "gemini-2.5-flash,gemini-2.0-flash").split(",")
+MODELS = [x.strip().removeprefix("models/") for x in RAW_MODELS if x.strip() and "flash" in x.lower()]
 MODELS = MODELS or ["gemini-2.5-flash", "gemini-2.0-flash"]
 TTS_MODELS = ["gemini-2.5-flash-preview-tts", "gemini-3.1-flash-tts-preview"]
 
@@ -31,7 +36,9 @@ def try_run(fn, *a, **kw):
         return None
 
 def get_db():
-    return (try_run(lambda: json.load(open(DB_FILE))) or {}) if os.path.exists(DB_FILE) else {}
+    if os.path.exists(DB_FILE):
+        return try_run(lambda: json.load(open(DB_FILE))) or {}
+    return {}
 
 def get_u(uid):
     db, k = get_db(), str(uid)
@@ -39,7 +46,11 @@ def get_u(uid):
     keys = d.get("keys", []) or ([d["key"]] if d.get("key") else [])
     v = d.get("v", "Zephyr") if d.get("v") in VOICES else "Zephyr"
     if k not in db or "keys" not in d or d.get("v") not in VOICES:
-        db[k] = {"keys": keys, "k_idx": d.get("k_idx", 0), "v": v, "f": d.get("f", True), "layout": d.get("layout", "frame"), "blur": d.get("blur", "auto"), "logo": d.get("logo", True), "verified": d.get("verified", False)}
+        db[k] = {
+            "keys": keys, "k_idx": d.get("k_idx", 0), "v": v, "f": d.get("f", True),
+            "layout": d.get("layout", "frame"), "blur": d.get("blur", "auto"),
+            "logo": d.get("logo", True), "verified": d.get("verified", False)
+        }
         json.dump(db, open(DB_FILE, "w"))
     return db[k]
 
@@ -62,7 +73,13 @@ def cancel_user_task(uid):
 
 def extract_keys(text):
     raw = re.split(r"[\s,;]+", text.strip())
-    return [x.strip() for x in raw if len(x.strip()) >= 20 and not x.startswith(("http", "/")) and (x.startswith(("AIza", "AQ.")) or re.match(r"^[A-Za-z0-9_\-\.]{25,}$", x.strip()))]
+    out = []
+    for x in raw:
+        s = x.strip()
+        if len(s) >= 20 and not s.startswith(("http", "/")):
+            if s.startswith(("AIza", "AQ.")) or re.match(r"^[A-Za-z0-9_\-\.]{25,}$", s):
+                out.append(s)
+    return out
 
 def add_user_keys(uid, new_keys):
     cur = list(get_u(uid).get("keys", []))
@@ -86,10 +103,18 @@ def join_kb():
     return InlineKeyboardMarkup(rows)
 
 def join_text():
-    return "🔒 Bot ကို အသုံးပြုရန် အောက်ပါ Channel (၃) ခုကို အရင် Join ပေးပါ -\n\n1️⃣ https://t.me/moviezone336\n2️⃣ https://t.me/color6777\n3️⃣ https://t.me/sigyi89\n\n✅ (၃) ခုလုံး Join ပြီးပါက အောက်ပါ Verify ခလုတ်ကို နှိပ်ပါ -"
+    t = "🔒 Bot ကို အသုံးပြုရန် အောက်ပါ Channel (၃) ခုကို အရင် Join ပေးပါ -\n\n"
+    t += "1️⃣ https://t.me/moviezone336\n"
+    t += "2️⃣ https://t.me/color6777\n"
+    t += "3️⃣ https://t.me/sigyi89\n\n"
+    t += "✅ (၃) ခုလုံး Join ပြီးပါက အောက်ပါ Verify ခလုတ်ကို နှိပ်ပါ -"
+    return t
 
 def main_kb():
-    return ReplyKeyboardMarkup([[KeyboardButton("🎬 Dashboard"), KeyboardButton("🔑 API Key")], [KeyboardButton("🎙️ Voice ရွေးရန်"), KeyboardButton("🖼️ Logo ပုံထည့်ရန်")], [KeyboardButton("/start")]], resize_keyboard=True)
+    r1 = [KeyboardButton("🎬 Dashboard"), KeyboardButton("🔑 API Key")]
+    r2 = [KeyboardButton("🎙️ Voice ရွေးရန်"), KeyboardButton("🖼️ Logo ပုံထည့်ရန်")]
+    r3 = [KeyboardButton("/start")]
+    return ReplyKeyboardMarkup([r1, r2, r3], resize_keyboard=True)
 
 def cancel_kb():
     return InlineKeyboardMarkup([[InlineKeyboardButton("🛑 ရပ်တန့်မည် / ပြန်စမည် (/start)", callback_data="r|cancel")]])
@@ -98,7 +123,9 @@ def key_menu_ui(u):
     keys = u.get("keys", [])
     lines = [f"{i+1}. {k[:6]}••••{k[-4:]}" for i, k in enumerate(keys[:10])]
     k_info = f"✅ သိမ်းထားသော Key ({len(keys)}) ခု -\n" + "\n".join(lines) if keys else "❌ API Key မထည့်ရသေးပါ။"
-    txt = f"🔑 GEMINI API KEY ROTATION စနစ်\n━━━━━━━━━━━━━━\n{k_info}\n\n💡 Key တစ်ခုချင်းဖြစ်စေ၊ အများကြီးကို Comma (,) သို့မဟုတ် တစ်ကြောင်းချင်းစီ ခြားပြီးဖြစ်စေ ပို့နိုင်ပါသည်။\n⚠️ Bot အလုပ်မလုပ်ပါက /start ကို နှိပ်ပါ။"
+    txt = f"🔑 GEMINI API KEY ROTATION စနစ်\n━━━━━━━━━━━━━━\n{k_info}\n\n"
+    txt += "💡 Key တစ်ခုချင်းဖြစ်စေ၊ အများကြီးကို Comma (,) ခြားပြီးဖြစ်စေ ပို့နိုင်ပါသည်။\n"
+    txt += "⚠️ Bot အလုပ်မလုပ်ပါက /start ကို နှိပ်ပါ။"
     kb = [[InlineKeyboardButton("🌐 Google AI Studio မှ Key ယူရန်", url="https://aistudio.google.com/app/apikey")]]
     if keys:
         kb.append([InlineKeyboardButton("🗑️ Key အားလုံး ဖျက်မည်", callback_data="m|clrkeys")])
@@ -107,10 +134,21 @@ def key_menu_ui(u):
 
 def voice_menu_ui(u):
     cur = u.get("v", "Zephyr")
-    txt = f"🎙️ အသံရွေးချယ်ရန် (Speed: 1.25x)\nလက်ရှိအသံ - 🌟 {cur}\n💡 (Thiha/Nilar မရပါက Google AI Zephyr/Charon သို့ အလိုအလျောက် ပြောင်းပေးပါမည်)\n━━━━━━━━━━━━━━"
-    r1 = [InlineKeyboardButton(f"{'🟢' if cur=='Zephyr' else '⚪'} 🌟 Zephyr", callback_data="v|Zephyr"), InlineKeyboardButton(f"{'🟢' if cur=='Charon' else '⚪'} 🌟 Charon", callback_data="v|Charon")]
-    r2 = [InlineKeyboardButton(f"{'🟢' if cur=='Kore' else '⚪'} 🌟 Kore", callback_data="v|Kore"), InlineKeyboardButton(f"{'🟢' if cur=='Puck' else '⚪'} 🌟 Puck", callback_data="v|Puck"), InlineKeyboardButton(f"{'🟢' if cur=='Fenrir' else '⚪'} 🌟 Fenrir", callback_data="v|Fenrir")]
-    r3 = [InlineKeyboardButton(f"{'🟢' if cur=='Thiha' else '⚪'} 👨 Thiha", callback_data="v|Thiha"), InlineKeyboardButton(f"{'🟢' if cur=='Nilar' else '⚪'} 👩 Nilar", callback_data="v|Nilar")]
+    txt = f"🎙️ အသံရွေးချယ်ရန် (Speed: 1.25x)\nလက်ရှိအသံ - 🌟 {cur}\n"
+    txt += "💡 (Thiha/Nilar မရပါက Google AI Zephyr/Charon သို့ အလိုအလျောက် ပြောင်းပေးပါမည်)\n━━━━━━━━━━━━━━"
+    r1 = [
+        InlineKeyboardButton(f"{'🟢' if cur=='Zephyr' else '⚪'} 🌟 Zephyr", callback_data="v|Zephyr"),
+        InlineKeyboardButton(f"{'🟢' if cur=='Charon' else '⚪'} 🌟 Charon", callback_data="v|Charon")
+    ]
+    r2 = [
+        InlineKeyboardButton(f"{'🟢' if cur=='Kore' else '⚪'} 🌟 Kore", callback_data="v|Kore"),
+        InlineKeyboardButton(f"{'🟢' if cur=='Puck' else '⚪'} 🌟 Puck", callback_data="v|Puck"),
+        InlineKeyboardButton(f"{'🟢' if cur=='Fenrir' else '⚪'} 🌟 Fenrir", callback_data="v|Fenrir")
+    ]
+    r3 = [
+        InlineKeyboardButton(f"{'🟢' if cur=='Thiha' else '⚪'} 👨 Thiha", callback_data="v|Thiha"),
+        InlineKeyboardButton(f"{'🟢' if cur=='Nilar' else '⚪'} 👩 Nilar", callback_data="v|Nilar")
+    ]
     r4 = [InlineKeyboardButton("🔙 Dashboard သို့ ပြန်သွားရန်", callback_data="m|dash")]
     return txt, InlineKeyboardMarkup([r1, r2, r3, r4])
 
@@ -123,20 +161,34 @@ def dash_ui(u, uid):
     b_txt = bm.get(u["blur"], "🎯 Auto-Detect")
     lg_t = ("ON ✅" if u["logo"] else "OFF ❌") if os.path.exists(f"logo_{uid}.jpg") else "ပုံမထည့်ရသေး"
     fl_t = "ON ✅" if u["f"] else "OFF ❌"
-    kb = [[InlineKeyboardButton(f"🔑 API Keys: {kt}", callback_data="m|key")], [InlineKeyboardButton(f"🎙️ Voice: {v_lbl}", callback_data="m|vmenu"), InlineKeyboardButton(f"🖼️ {lay}", callback_data="m|lay")], [InlineKeyboardButton(f"🌫️ Blur: {b_txt}", callback_data="m|blur"), InlineKeyboardButton(f"🏷️ Logo: {lg_t}", callback_data="m|logo")], [InlineKeyboardButton(f"🪞 Flip + Filter + Crop: {fl_t}", callback_data="m|f")]]
-    txt = f"⚡ SIGYI AI STUDIO PRO (ULTRA HD) ⚡\n━━━━━━━━━━━━━━\n• 🔑 API Keys: {kt} (Auto-Rotation ✅)\n• 🤖 AI: Gemini Flash + Google AI TTS ✅\n• 🎙️ Voice: {v_lbl} | 📺 Ultra HD\n• 🖼️ {lay} | 🌫️ Blur: {b_txt}\n• 🎯 Scene-Locked Frame Sync: Active ✅\n━━━━━━━━━━━━━━\n📥 TikTok / YouTube / Rednote Link သို့မဟုတ် Video ပို့ပါ!\n💡 (Bot အလုပ်မလုပ်ပါက /start ကို နှိပ်ပါ)"
+    kb = [
+        [InlineKeyboardButton(f"🔑 API Keys: {kt}", callback_data="m|key")],
+        [InlineKeyboardButton(f"🎙️ Voice: {v_lbl}", callback_data="m|vmenu"), InlineKeyboardButton(f"🖼️ {lay}", callback_data="m|lay")],
+        [InlineKeyboardButton(f"🌫️ Blur: {b_txt}", callback_data="m|blur"), InlineKeyboardButton(f"🏷️ Logo: {lg_t}", callback_data="m|logo")],
+        [InlineKeyboardButton(f"🪞 Flip + Filter + Crop: {fl_t}", callback_data="m|f")]
+    ]
+    txt = "⚡ SIGYI AI STUDIO PRO (ULTRA HD) ⚡\n━━━━━━━━━━━━━━\n"
+    txt += f"• 🔑 API Keys: {kt} (Auto-Rotation ✅)\n"
+    txt += "• 🤖 AI: Gemini Flash + Google AI TTS ✅\n"
+    txt += f"• 🎙️ Voice: {v_lbl} | 📺 Ultra HD\n"
+    txt += f"• 🖼️ {lay} | 🌫️ Blur: {b_txt}\n"
+    txt += "• 🎯 Scene-Locked Frame Sync: Active ✅\n━━━━━━━━━━━━━━\n"
+    txt += "📥 TikTok / YouTube / Rednote Link သို့မဟုတ် Video ပို့ပါ!\n"
+    txt += "💡 (Bot အလုပ်မလုပ်ပါက /start ကို နှိပ်ပါ)"
     return txt, InlineKeyboardMarkup(kb)
 
 def is_valid_video(p):
     if not os.path.exists(p) or os.path.getsize(p) < 10000:
         return False
-    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_type", "-of", "csv=p=0", p], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_type", "-of", "csv=p=0", p]
+    r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     return "video" in r.stdout.lower()
 
 def is_valid_audio(p):
     if not os.path.exists(p) or os.path.getsize(p) < 600:
         return False
-    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_type", "-of", "csv=p=0", p], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    cmd = ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_type", "-of", "csv=p=0", p]
+    r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     return "audio" in r.stdout.lower()
 
 def save_stream_url(dl_url, vpath, ua, ref=""):
@@ -154,8 +206,11 @@ def save_stream_url(dl_url, vpath, ua, ref=""):
     return False
 
 def find_mp4(obj):
-    if isinstance(obj, str) and obj.startswith("http") and not any(b in obj.lower() for b in [".mp3", ".m4a", ".jpg", ".png", ".webp", ".jpeg"]):
-        return obj if any(x in obj.lower() for x in [".mp4", "video", "play", "stream", "xhscdn", "googlevideo", "tikcdn", "aweme"]) else None
+    if isinstance(obj, str) and obj.startswith("http"):
+        if not any(b in obj.lower() for b in [".mp3", ".m4a", ".jpg", ".png", ".webp", ".jpeg"]):
+            if any(x in obj.lower() for x in [".mp4", "video", "play", "stream", "xhscdn", "googlevideo", "tikcdn", "aweme"]):
+                return obj
+        return None
     if isinstance(obj, dict):
         for k in ["play", "hdplay", "noWatermark", "video", "url", "download", "mp4", "url_list", "data", "result"]:
             if k in obj and (r := find_mp4(obj[k])):
@@ -181,7 +236,14 @@ def yt_dlp_download(url, vpath, ua):
         outbase = f"{base}{i}"
         for old in [x for x in os.listdir(".") if x.startswith(outbase)]:
             try_run(os.remove, old)
-        opts = {"format": "bv*[ext=mp4][height<=720]+ba[ext=m4a]/b[ext=mp4][height<=720]/b[ext=mp4]/b", "merge_output_format": "mp4", "outtmpl": f"{outbase}.%(ext)s", "quiet": True, "no_warnings": True, "noplaylist": True, "nocheckcertificate": True, "retries": 3, "fragment_retries": 3, "extractor_retries": 3, "socket_timeout": 25, "concurrent_fragment_downloads": 1, "force_ipv4": True, "http_headers": {"User-Agent": ua, "Referer": "https://www.tiktok.com/"}, **extra}
+        opts = {
+            "format": "bv*[ext=mp4][height<=720]+ba[ext=m4a]/b[ext=mp4][height<=720]/b[ext=mp4]/b",
+            "merge_output_format": "mp4", "outtmpl": f"{outbase}.%(ext)s",
+            "quiet": True, "no_warnings": True, "noplaylist": True, "nocheckcertificate": True,
+            "retries": 3, "fragment_retries": 3, "extractor_retries": 3, "socket_timeout": 25,
+            "concurrent_fragment_downloads": 1, "force_ipv4": True,
+            "http_headers": {"User-Agent": ua, "Referer": "https://www.tiktok.com/"}, **extra
+        }
         try_run(lambda: yt_dlp.YoutubeDL(opts).download([url]))
         candidates = [x for x in os.listdir(".") if x.startswith(outbase + ".") and is_valid_video(x)]
         if candidates:
@@ -209,10 +271,13 @@ def dl_vid(url, vpath):
                 pu = "https://www.tikwm.com" + pu if pu.startswith("/") else pu
                 if save_stream_url(pu, vpath, ua_m, "https://www.tikwm.com/") or (try_run(lambda: urllib.request.urlretrieve(pu, vpath)) and is_valid_video(vpath)):
                     return
-        d2 = (try_run(lambda: json.loads(urllib.request.urlopen(urllib.request.Request(f"https://api.tiklydown.eu.org/api/download?url={urllib.parse.quote(url)}", headers={"User-Agent": ua_d}), timeout=15).read().decode())) or {}).get("video", {})
+        api2 = f"https://api.tiklydown.eu.org/api/download?url={urllib.parse.quote(url)}"
+        d2 = (try_run(lambda: json.loads(urllib.request.urlopen(urllib.request.Request(api2, headers={"User-Agent": ua_d}), timeout=15).read().decode())) or {}).get("video", {})
         if (pu2 := (d2.get("noWatermark") or d2.get("watermark"))) and save_stream_url(pu2, vpath, ua_d):
             return
-        d3 = (try_run(lambda: json.loads(urllib.request.urlopen(urllib.request.Request("https://lovetik.com/api/ajax/search", data=urllib.parse.urlencode({"query": url}).encode(), headers={"User-Agent": ua_d, "Origin": "https://lovetik.com"}), timeout=15).read().decode())) or {}).get("links", [])
+        post_lt = urllib.parse.urlencode({"query": url}).encode()
+        req_lt = urllib.request.Request("https://lovetik.com/api/ajax/search", data=post_lt, headers={"User-Agent": ua_d, "Origin": "https://lovetik.com"})
+        d3 = (try_run(lambda: json.loads(urllib.request.urlopen(req_lt, timeout=15).read().decode())) or {}).get("links", [])
         for lk in d3:
             if (pu3 := lk.get("a")) and "mp3" not in (lk.get("t") or "").lower() and save_stream_url(pu3, vpath, ua_d, "https://lovetik.com/"):
                 return
@@ -220,9 +285,12 @@ def dl_vid(url, vpath):
         for ua in [ua_d, ua_m]:
             req_x = urllib.request.Request(url, headers={"User-Agent": ua, "Cookie": "webBuild=4.36.0; xsecappid=xhs-pc-web;"})
             html = try_run(lambda: urllib.request.urlopen(req_x, timeout=15).read().decode("utf-8", "ignore")) or ""
-            mk, mog, mm = re.search(r'"originVideoKey"\s*:\s*"([^"]+)"', html), re.search(r'<meta\s+(?:name|property)="og:video"\s+content="([^"]+)"', html), re.search(r'"masterUrl"\s*:\s*"([^"]+)"', html)
+            mk = re.search(r'"originVideoKey"\s*:\s*"([^"]+)"', html)
+            mog = re.search(r'<meta\s+(?:name|property)="og:video"\s+content="([^"]+)"', html)
+            mm = re.search(r'"masterUrl"\s*:\s*"([^"]+)"', html)
             mcdn = re.search(r'(https?://sns-video-[a-z0-9\-]+\.xhscdn\.com/[^"\'\s\\]+)', html)
-            cands = ([f"https://sns-video-bd.xhscdn.com/{mk.group(1).replace(chr(92)+'u002F', '/')}", f"https://sns-video-hw.xhscdn.com/{mk.group(1).replace(chr(92)+'u002F', '/')}"] if mk else []) + [m.group(1) for m in [mog, mm, mcdn] if m]
+            k_s = mk.group(1).replace("\\u002F", "/") if mk else ""
+            cands = ([f"https://sns-video-bd.xhscdn.com/{k_s}", f"https://sns-video-hw.xhscdn.com/{k_s}"] if k_s else []) + [m.group(1) for m in [mog, mm, mcdn] if m]
             for vu in cands:
                 vu = vu.replace("\\u002F", "/").replace("&amp;", "&")
                 if save_stream_url(vu if vu.startswith("http") else "https:" + vu, vpath, ua, "https://www.xiaohongshu.com/"):
@@ -232,10 +300,12 @@ def dl_vid(url, vpath):
         vid_id = ym.group(1)
         clean_yt = f"https://www.youtube.com/watch?v={vid_id}"
         for fmt in ["720", "480", "360"]:
-            tid = (try_run(lambda: json.loads(urllib.request.urlopen(urllib.request.Request(f"https://p.oceansaver.in/ajax/download.php?format={fmt}&url={urllib.parse.quote(clean_yt)}", headers={"User-Agent": ua_d}), timeout=12).read().decode())) or {}).get("id")
+            u_os = f"https://p.oceansaver.in/ajax/download.php?format={fmt}&url={urllib.parse.quote(clean_yt)}"
+            tid = (try_run(lambda: json.loads(urllib.request.urlopen(urllib.request.Request(u_os, headers={"User-Agent": ua_d}), timeout=12).read().decode())) or {}).get("id")
             for _ in range(10 if tid else 0):
                 time.sleep(2)
-                dl_u = (try_run(lambda: json.loads(urllib.request.urlopen(urllib.request.Request(f"https://p.oceansaver.in/ajax/progress.php?id={tid}", headers={"User-Agent": ua_d}), timeout=10).read().decode())) or {}).get("download_url")
+                u_pr = f"https://p.oceansaver.in/ajax/progress.php?id={tid}"
+                dl_u = (try_run(lambda: json.loads(urllib.request.urlopen(urllib.request.Request(u_pr, headers={"User-Agent": ua_d}), timeout=10).read().decode())) or {}).get("download_url")
                 if dl_u and save_stream_url(dl_u, vpath, ua_d):
                     return
         from pytubefix import YouTube
@@ -295,7 +365,8 @@ def _try_models_with_file(client, model_candidates, uf, p, uid, k_i):
     return "", last_err
 
 def ai_frame_audio_translate(vpath, sm_v, uid, vdur, n_win):
-    subprocess.run(["ffmpeg", "-y", "-threads", "2", "-i", vpath, "-t", f"{vdur:.2f}", "-vf", "fps=1,scale=280:-2", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "35", "-c:a", "aac", "-ac", "1", "-ar", "16000", "-b:a", "28k", sm_v], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=40)
+    cmd_sm = ["ffmpeg", "-y", "-threads", "2", "-i", vpath, "-t", f"{vdur:.2f}", "-vf", "fps=1,scale=280:-2", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "35", "-c:a", "aac", "-ac", "1", "-ar", "16000", "-b:a", "28k", sm_v]
+    subprocess.run(cmd_sm, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=40)
     up_file = sm_v if (os.path.exists(sm_v) and os.path.getsize(sm_v) > 1000) else vpath
     u = get_u(uid)
     keys = u.get("keys", [])
@@ -304,11 +375,23 @@ def ai_frame_audio_translate(vpath, sm_v, uid, vdur, n_win):
     start_idx = u.get("k_idx", 0) % len(keys)
     w_dur = vdur / n_win
     chars_w = max(65, int(w_dur * 15.2))
-    win_desc = "၊ ".join([f"အပိုင်း {i+1} ({int(i*w_dur)}s မှ {int((i+1)*w_dur)}s)" for i in range(n_win)])
-    p = f"ဒီ Video ဖိုင်ရဲ့ ရုပ်ပုံ (Frames) နဲ့ မူရင်းအသံ (Audio) နှစ်ခုလုံးကို သေချာကြည့်ရှုနားထောင်ပြီး အောက်ပါ အချိန်အပိုင်းအခြား ({n_win}) ပိုင်းအတိုင်း အတိအကျ ခွဲ၍ အပိုအလိုမရှိဘဲ Burmese Professional Movie Recap စကားပြောပုံစံဖြင့် ဘာသာပြန်ပေးပါ - {win_desc}\n\n"
-    p += "အတိအကျ လိုက်နာရမည့် ဥပမာ အရေးအသားပုံစံ -\n"
-    p += "အမျိုးသားတစ်ယောက်ဟာ လှေပေါ်မှာ ဓားနဲ့ ကစားနေရင်း မတော်တဆ အပေါက်ဖောက်မိသွားတဲ့အတွက် ရေတွေ စတင် စိမ့်ဝင်လာပါတယ်။ ရေတွေက သင်္ဘောကုန်းပတ်ပေါ်အထိ လျင်မြန်စွာ တက်လာချိန်မှာပဲ တခြားလှေတစ်စင်း ချဉ်းကပ်လာတာကို သူ မြင်လိုက်ရပါတယ်။ ||| သူက သူ့ခြေထောက်နဲ့ အပေါက်ကို အမြန်ဖုံးအုပ်ပြီး ဘာမှမဖြစ်သလို ဟန်ဆောင်လိုက်ပါတယ်။ ရုတ်တရက်ဆိုသလိုပဲ ကင်းလှည့်ရေယာဉ်တစ်စင်း သူတို့ရှေ့မှာ ပေါ်လာပါတယ်။ သူတို့တွေက ငါးဖမ်းသမားတွေလို ဟန်ဆောင်ကြပေမဲ့ ရန်သူခေါင်းဆောင်ကတော့ တစ်ခုခု လွဲနေတယ်လို့ သံသယဝင်သွားပြီး စစ်ဆေးဖို့အတွက် သူတို့လှေပေါ်ကို တက်လာပါတော့တယ်။ ||| ခေါင်းဆောင်က အန်နာ ဆီကို လျှောက်သွားပြီး ငါးမျှားတံကို ကောက်ကိုင်ကာ ငါးဖမ်းဟန်ဆောင်လိုက်ပါတယ်။ အန်နာက လျင်မြန်စွာ လှည့်လိုက်တဲ့အခါ ငါးမျှားတံက သူမလက်ထဲကနေ လွင့်စင်သွားခဲ့ပါတယ်။\n\n"
-   p += f"စည်းကမ်းချက် - အပိုင်းတစ်ပိုင်းစီအတွက် အဲ့ဒီအချိန်အတွင်း မြင်ရကြားရသည့်အတိုင်း မြန်မာစာလုံးရေ {chars_w} လုံးခန့် ရေးပြီး အပိုင်းကြားတွင် ||| သင်္ကေတ ခြားပေးပါ။ လူနာမည်များကို မြန်မာလိုသာရေးပါ၊ အင်္ဂလိပ်စာလုံးနှင့် ကွင်းစကွင်းပိတ် လုံးဝ မထည့်ပါနှင့်။"
+    win_desc = "၊ ".join([f"အပိုင်း {i+1} ({int(i*w_dur)}s-{int((i+1)*w_dur)}s)" for i in range(n_win)])
+    p_lines = [
+        f"ဒီ Video ဖိုင်ရဲ့ ရုပ်ပုံနဲ့ မူရင်းအသံကို သေချာကြည့်ရှုနားထောင်ပြီး ({n_win}) ပိုင်းခွဲ၍",
+        f"အပိုအလိုမရှိဘဲ Burmese Professional Movie Recap ပုံစံဖြင့် ဘာသာပြန်ပေးပါ - {win_desc}",
+        "အတိအကျ လိုက်နာရမည့် ဥပမာ အရေးအသားပုံစံ -",
+   "အမျိုးသားတစ်ယောက်ဟာ လှေပေါ်မှာ ဓားနဲ့ ကစားနေရင်း မတော်တဆ အပေါက်ဖောက်မိသွားတဲ့အတွက်",
+        "ရေတွေ စတင် စိမ့်ဝင်လာပါတယ်။ ရေတွေက သင်္ဘောကုန်းပတ်ပေါ်အထိ လျင်မြန်စွာ တက်လာချိန်မှာပဲ",
+        "တခြားလှေတစ်စင်း ချဉ်းကပ်လာတာကို သူ မြင်လိုက်ရပါတယ်။ |||",
+        "သူက သူ့ခြေထောက်နဲ့ အပေါက်ကို အမြန်ဖုံးအုပ်ပြီး ဘာမှမဖြစ်သလို ဟန်ဆောင်လိုက်ပါတယ်။",
+        "ရုတ်တရက်ဆိုသလိုပဲ ကင်းလှည့်ရေယာဉ်တစ်စင်း သူတို့ရှေ့မှာ ပေါ်လာပါတယ်။",
+        "ရန်သူခေါင်းဆောင်ကတော့ သံသယဝင်သွားပြီး စစ်ဆေးဖို့ သူတို့လှေပေါ်ကို တက်လာပါတော့တယ်။ |||",
+        "ခေါင်းဆောင်က အန်နာ ဆီကို လျှောက်သွားပြီး ငါးမျှားတံကို ကောက်ကိုင်ကာ ငါးဖမ်းဟန်ဆောင်လိုက်ပါတယ်။",
+        "အန်နာက လျင်မြန်စွာ လှည့်လိုက်တဲ့အခါ ငါးမျှားတံက သူမလက်ထဲကနေ လွင့်စင်သွားခဲ့ပါတယ်။",
+        f"စည်းကမ်းချက် - တစ်ပိုင်းစီအတွက် မြန်မာစာလုံးရေ {chars_w} လုံးခန့် ရေးပြီး",
+        "အပိုင်းကြားတွင် ||| သင်္ကေတ ခြားပေးပါ။ အင်္ဂလိပ်စာနှင့် ကွင်းစကွင်းပိတ် လုံးဝ မထည့်ပါနှင့်။"
+    ]
+    p = "\n".join(p_lines)
     raw_txt, last_err = "", None
     for step_i in range(len(keys)):
         k_i = (start_idx + step_i) % len(keys)
@@ -322,7 +405,7 @@ def ai_frame_audio_translate(vpath, sm_v, uid, vdur, n_win):
                 time.sleep(1)
                 uf = try_run(lambda: client.files.get(name=uf.name)) or uf
         if getattr(getattr(uf, "state", None), "name", "") == "PROCESSING":
-            last_err = RuntimeError("Gemini video file is still processing after 120 seconds")
+            last_err = RuntimeError("Gemini video file is still processing")
             try_run(lambda: client.files.delete(name=uf.name))
             continue
         raw_txt, err_one = _try_models_with_file(client, model_candidates, uf, p, uid, k_i)
@@ -334,7 +417,7 @@ def ai_frame_audio_translate(vpath, sm_v, uid, vdur, n_win):
     if not raw_txt:
         err_text = str(last_err or "Unknown Gemini API error")
         if any(w in err_text.upper() for w in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "LIMIT: 0"]):
-            raise Exception("Gemini API quota ပြည့်နေပါသည်။ Google AI Studio မှ Key အသစ်ထည့်ပြီး ပြန်စမ်းပေးပါ။")
+            raise Exception("Gemini API quota ပြည့်နေပါသည်။ Key အသစ်ထည့်ပြီး ပြန်စမ်းပေးပါ။")
         raise Exception(f"Gemini API Error: {err_text[:600]}")
     parts = [clean_mm_text(x) for x in raw_txt.split("|||") if len(clean_mm_text(x)) > 5]
     if len(parts) != n_win:
@@ -369,7 +452,8 @@ def _gemini_tts_call(text, g_voice, out_wav, uid, key_offset=0):
         return False
     start_idx = (u.get("k_idx", 0) + key_offset) % len(keys)
     pvc = types.PrebuiltVoiceConfig(voice_name=g_voice)
-    cfg = types.GenerateContentConfig(response_modalities=["AUDIO"], speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(prebuilt_voice_config=pvc)))
+    sc = types.SpeechConfig(voice_config=types.VoiceConfig(prebuilt_voice_config=pvc))
+    cfg = types.GenerateContentConfig(response_modalities=["AUDIO"], speech_config=sc)
     prompt = f"Read the following Burmese narration aloud naturally and clearly in Burmese:\n\n{text}"
     for step_i in range(len(keys)):
         k_i = (start_idx + step_i) % len(keys)
@@ -385,7 +469,8 @@ def _gemini_tts_call(text, g_voice, out_wav, uid, key_offset=0):
     return False
 
 def _detect_silence_midpoints(wav_path):
-    r = subprocess.run(["ffmpeg", "-i", wav_path, "-af", "silencedetect=n=-38dB:d=0.14", "-f", "null", "-"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    cmd = ["ffmpeg", "-i", wav_path, "-af", "silencedetect=n=-38dB:d=0.14", "-f", "null", "-"]
+    r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     starts = [float(x) for x in re.findall(r"silence_start:\s*([0-9.]+)", r.stderr)]
     ends = [float(x) for x in re.findall(r"silence_end:\s*([0-9.]+)", r.stderr)]
     return [(s + e) / 2.0 for s, e in zip(starts, ends)]
@@ -396,7 +481,9 @@ def _gemini_single_call_and_slice(seg_scripts, g_voice, work, uid):
     clean_full = os.path.join(work, "g_full_125x.wav")
     if not _gemini_tts_call(joined_txt, g_voice, raw_full, uid, 0):
         return None
-    af = "silenceremove=start_periods=1:start_duration=0.02:start_threshold=-45dB,areverse,silenceremove=start_periods=1:start_duration=0.02:start_threshold=-45dB,areverse,atempo=1.25,highpass=f=80,loudnorm=I=-16:TP=-1.5:LRA=11,aresample=24000,asetpts=PTS-STARTPTS"
+    af = "silenceremove=start_periods=1:start_duration=0.02:start_threshold=-45dB,"
+    af += "areverse,silenceremove=start_periods=1:start_duration=0.02:start_threshold=-45dB,areverse,"
+    af += "atempo=1.25,highpass=f=80,loudnorm=I=-16:TP=-1.5:LRA=11,aresample=24000,asetpts=PTS-STARTPTS"
     subprocess.run(["ffmpeg", "-y", "-i", raw_full, "-af", af, "-ac", "1", "-ar", "24000", clean_full], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if not is_valid_audio(clean_full):
         return None
@@ -487,7 +574,6 @@ async def build_free_synced_voice(seg_scripts, voice_key, out_a, uid, vdur):
     os.makedirs(work, exist_ok=True)
     try:
         raw_seg_wavs = []
-        # 1. Try Thiha / Nilar (Edge-TTS at 1.25x) if selected
         if voice_key in EDGE_MAP:
             edge_v = EDGE_MAP[voice_key]
             edge_ok = True
@@ -506,7 +592,9 @@ async def build_free_synced_voice(seg_scripts, voice_key, out_a, uid, vdur):
                 if not is_valid_audio(raw):
                     edge_ok = False
                     break
-                af = "silenceremove=start_periods=1:start_duration=0.02:start_threshold=-45dB,areverse,silenceremove=start_periods=1:start_duration=0.02:start_threshold=-45dB,areverse,highpass=f=80,loudnorm=I=-16:TP=-1.5:LRA=11,aresample=24000,asetpts=PTS-STARTPTS"
+                af = "silenceremove=start_periods=1:start_duration=0.02:start_threshold=-45dB,"
+                af += "areverse,silenceremove=start_periods=1:start_duration=0.02:start_threshold=-45dB,areverse,"
+                af += "highpass=f=80,loudnorm=I=-16:TP=-1.5:LRA=11,aresample=24000,asetpts=PTS-STARTPTS"
                 subprocess.run(["ffmpeg", "-y", "-i", raw, "-af", af, "-ac", "1", "-ar", "24000", cw], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=45)
                 if not is_valid_audio(cw):
                     edge_ok = False
@@ -515,13 +603,11 @@ async def build_free_synced_voice(seg_scripts, voice_key, out_a, uid, vdur):
             if edge_ok and len(raw_seg_wavs) == len(seg_scripts):
                 return await asyncio.to_thread(_pace_and_concat_segments, raw_seg_wavs, work, out_a, vdur)
 
-        # 2. Google AI Studio Natural TTS (Zephyr, Charon, Kore, Puck, Fenrir) at 1.25x Speed
         g_voice = GEMINI_FALLBACK_MAP.get(voice_key, voice_key if voice_key in VOICES else "Zephyr")
         sliced = await asyncio.to_thread(_gemini_single_call_and_slice, seg_scripts, g_voice, work, uid)
         if sliced and len(sliced) == len(seg_scripts):
             return await asyncio.to_thread(_pace_and_concat_segments, sliced, work, out_a, vdur)
 
-        # 3. Per-segment Google AI Studio TTS with Multi-Key Rotation fallback
         raw_seg_wavs = []
         for i, script in enumerate(seg_scripts):
             text = clean_mm_text(script) or "အဲ့ဒီနောက်မှာတော့"
@@ -532,7 +618,9 @@ async def build_free_synced_voice(seg_scripts, voice_key, out_a, uid, vdur):
                 raw_w = os.path.join(work, f"gtts_{i}.mp3")
                 if not await asyncio.to_thread(_google_tts_fallback, text, raw_w, uid, i):
                     raise RuntimeError(f"TTS အသံထုတ်မရပါ (Segment {i + 1})")
-            af = "silenceremove=start_periods=1:start_duration=0.02:start_threshold=-45dB,areverse,silenceremove=start_periods=1:start_duration=0.02:start_threshold=-45dB,areverse,atempo=1.25,highpass=f=80,loudnorm=I=-16:TP=-1.5:LRA=11,aresample=24000,asetpts=PTS-STARTPTS"
+            af = "silenceremove=start_periods=1:start_duration=0.02:start_threshold=-45dB,"
+            af += "areverse,silenceremove=start_periods=1:start_duration=0.02:start_threshold=-45dB,areverse,"
+            af += "atempo=1.25,highpass=f=80,loudnorm=I=-16:TP=-1.5:LRA=11,aresample=24000,asetpts=PTS-STARTPTS"
             subprocess.run(["ffmpeg", "-y", "-i", raw_w, "-af", af, "-ac", "1", "-ar", "24000", cw], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=45)
             if not is_valid_audio(cw):
                 raise RuntimeError(f"Audio conversion failed at segment {i + 1}")
@@ -571,7 +659,8 @@ def detect_sub_band(iv, vdur, is_fr, uid):
 def get_dur(p):
     if not p or not os.path.exists(p):
         raise FileNotFoundError(f"Media file not found: {p}")
-    r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", p], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20)
+    cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", p]
+    r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20)
     duration = try_run(lambda: float(r.stdout.strip())) or 0.0
     if r.returncode != 0 or duration <= 0:
         raise RuntimeError(f"Invalid media duration for {os.path.basename(p)}")
@@ -600,7 +689,12 @@ def edit_vid(iv, ia, ov, u, uid, vdur, seg_durs):
     last_err = ""
     for sync_f in [pw_s, un_s]:
         try_run(os.remove, ov)
-        fc = f"[0:v]{sync_f}{fl}[v0];" + (f"[v0]split=2[bgi][fgi];[bgi]scale=180:320:force_original_aspect_ratio=increase,crop=180:320,gblur=sigma=14,eq=brightness=-0.07,scale=720:1280[bg];[fgi]{adj},scale=720:820:force_original_aspect_ratio=increase:flags=lanczos,crop=720:820[fg];[bg][fg]overlay=0:230[v1]" if is_fr else f"[v0]{adj},scale=720:1280:force_original_aspect_ratio=increase:flags=lanczos,crop=720:1280[v1]")
+        fc = f"[0:v]{sync_f}{fl}[v0];"
+        if is_fr:
+            fc += "[v0]split=2[bgi][fgi];[bgi]scale=180:320:force_original_aspect_ratio=increase,crop=180:320,gblur=sigma=14,eq=brightness=-0.07,scale=720:1280[bg];"
+            fc += f"[fgi]{adj},scale=720:820:force_original_aspect_ratio=increase:flags=lanczos,crop=720:820[fg];[bg][fg]overlay=0:230[v1]"
+        else:
+            fc += f"[v0]{adj},scale=720:1280:force_original_aspect_ratio=increase:flags=lanczos,crop=720:1280[v1]"
         cur = "[v1]"
         if u.get("blur") != "off":
             fc += f";{cur}split=2[m1][m2];[m2]crop=640:{bh}:40:{by},gblur=sigma=26[bst];[m1][bst]overlay=40:{by}[v2]"
