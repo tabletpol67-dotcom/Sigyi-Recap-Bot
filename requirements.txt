@@ -5,3 +5,4 @@ gTTS>=2.5.0
 yt-dlp[default,curl-cffi]
 pytubefix
 btch-downloader
+google-generativeai
