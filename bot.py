@@ -1,0 +1,573 @@
+import re; CODE = r"""
+@0 import os, re, sys, site, json, time, wave, base64, shutil, zipfile, asyncio, subprocess, urllib.request, urllib.parse, logging
+@0 from pathlib import Path
+@0 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+@0 for pkg in ["yt-dlp[default,curl-cffi]", "pytubefix", "btch-downloader"]:
+@1 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-U", pkg], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+@0 def setup_pot_server():
+@1 try:
+@2 pot_bin = "/tmp/bgutil-pot"
+@2 if not os.path.exists(pot_bin):
+@3 u_b = "https://github.com/jim60105/bgutil-ytdlp-pot-provider-rs/releases/latest/download/bgutil-pot-linux-x86_64"
+@3 urllib.request.urlretrieve(u_b, pot_bin)
+@3 os.chmod(pot_bin, 0o755)
+@3 u_z = "https://github.com/jim60105/bgutil-ytdlp-pot-provider-rs/releases/latest/download/bgutil-ytdlp-pot-provider-rs.zip"
+@3 z_p = "/tmp/pot_plugin.zip"
+@3 urllib.request.urlretrieve(u_z, z_p)
+@3 with zipfile.ZipFile(z_p, "r") as zf:
+@4 zf.extractall(site.getsitepackages()[0])
+@2 subprocess.Popen([pot_bin, "server"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+@2 os.environ["YT_DLP_POT_PROVIDER_URL"] = "http://127.0.0.1:4416"
+@1 except Exception as e:
+@2 logging.error(f"POT Server Setup Error: {e}")
+@0 setup_pot_server()
+@0 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+@0 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+@0 from google import genai
+@0 from google.genai import types
+@0 import yt_dlp
+@0 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+@0 DB_FILE = "users.json"
+@0 SESSIONS, ACTIVE_TASKS = {}, {}
+@0 GEMINI_VOICES = {"1": "Acha", "2": "Amma", "3": "Htet", "4": "Myat", "5": "Nilar", "6": "Thalita", "7": "Aung", "8": "Thurein", "9": "Htun Su", "10": "Ko Oo", "11": "Thiha"}
+@0 VOICES = list(GEMINI_VOICES.values())
+@0 C1 = ("@moviezone336", "https://t.me/moviezone336", "📢 Channel 1 Join ရန်")
+@0 C2 = ("@color6777", "https://t.me/color6777", "📢 Channel 2 Join ရန်")
+@0 C3 = ("@sigyi89", "https://t.me/sigyi89", "📢 Channel 3 Join ရန်")
+@0 CHANNELS = [C1, C2, C3]
+@0 RAW_M = os.getenv("GEMINI_MODELS", "gemini-2.5-flash,gemini-2.0-flash").split(",")
+@0 MODELS = [x.strip().removeprefix("models/") for x in RAW_M if x.strip() and "flash" in x.lower()] or ["gemini-2.5-flash", "gemini-2.0-flash"]
+@0 TTS_MODELS = ["gemini-2.5-flash-preview-tts", "gemini-3.1-flash-tts-preview"]
+@0 def safe_execution(func, *args, **kwargs):
+@1 try:
+@2 return func(*args, **kwargs)
+@1 except Exception as e:
+@2 logging.error(f"Error in {func.__name__}: {str(e)}")
+@2 return None
+@0 def get_db():
+@1 if os.path.exists(DB_FILE):
+@2 return safe_execution(lambda: json.load(open(DB_FILE))) or {}
+@1 return {}
+@0 def get_u(uid):
+@1 db, k = get_db(), str(uid)
+@1 d = db.get(k, {})
+@1 keys = d.get("keys", []) or ([d["key"]] if d.get("key") else [])
+@1 v = d.get("v", "Thiha") if d.get("v") in VOICES else "Thiha"
+@1 if k not in db or "keys" not in d or d.get("v") not in VOICES:
+@2 db[k] = {"keys": keys, "k_idx": d.get("k_idx", 0), "v": v, "f": d.get("f", True), "layout": d.get("layout", "frame"), "blur": d.get("blur", "auto"), "logo": d.get("logo", True), "verified": d.get("verified", False)}
+@2 safe_execution(lambda: json.dump(db, open(DB_FILE, "w")))
+@1 return db[k]
+@0 def set_u(uid, field, val):
+@1 db, k = get_db(), str(uid)
+@1 if k not in db:
+@2 get_u(uid)
+@2 db = get_db()
+@1 db[k][field] = val
+@1 safe_execution(lambda: json.dump(db, open(DB_FILE, "w")))
+@0 def cancel_user_task(uid):
+@1 t = ACTIVE_TASKS.pop(uid, None)
+@1 if t and not t.done():
+@2 t.cancel()
+@1 for f in os.listdir("."):
+@2 if str(uid) in f and not f.startswith("logo_"):
+@3 safe_execution(os.remove, f)
+@1 SESSIONS.pop(uid, None)
+@0 def extract_keys(text):
+@1 raw = re.split(r"[\s,;]+", text.strip())
+@1 return [x.strip() for x in raw if len(x.strip()) >= 20 and not x.startswith(("http", "/")) and (x.startswith(("AIza", "AQ.")) or re.match(r"^[A-Za-z0-9_\-\.]{25,}$", x.strip()))]
+@0 def add_user_keys(uid, new_keys):
+@1 cur = list(get_u(uid).get("keys", []))
+@1 added = sum(1 for nk in new_keys if nk not in cur and not cur.append(nk))
+@1 set_u(uid, "keys", cur)
+@1 return added, len(cur)
+@0 async def check_joined(bot, uid):
+@1 for ch_id, _, _ in CHANNELS:
+@2 try:
+@3 m = await bot.get_chat_member(chat_id=ch_id, user_id=uid)
+@3 if m.status in ["left", "kicked"]:
+@4 return False
+@2 except Exception:
+@3 continue
+@1 return True
+@0 def join_kb():
+@1 rows = [[InlineKeyboardButton(lbl, url=url)] for _, url, lbl in CHANNELS]
+@1 rows.append([InlineKeyboardButton("✅ Join ပြီးပါပြီ (Verify လုပ်မည်)", callback_data="verify|check")])
+@1 return InlineKeyboardMarkup(rows)
+@0 def join_text():
+@1 return "🔒 Bot ကို အသုံးပြုရန် အောက်ပါ Channel (၃) ခုကို အရင် Join ပေးပါ -\n\n1️⃣ https://t.me/moviezone336\n2️⃣ https://t.me/color6777\n3️⃣ https://t.me/sigyi89\n\n✅ (၃) ခုလုံး Join ပြီးပါက အောက်ပါ Verify ခလုတ်ကို နှိပ်ပါ -"
+@0 def main_kb():
+@1 r1 = [KeyboardButton("🎬 Dashboard"), KeyboardButton("🔑 API Key")]
+@1 r2 = [KeyboardButton("🎙️ Voice ရွေးရန်"), KeyboardButton("🖼️ Logo ပုံထည့်ရန်")]
+@1 return ReplyKeyboardMarkup([r1, r2, [KeyboardButton("/start")]], resize_keyboard=True)
+@0 def cancel_kb():
+@1 return InlineKeyboardMarkup([[InlineKeyboardButton("🛑 ရပ်တန့်မည် / ပြန်စမည် (/start)", callback_data="r|cancel")]])
+@0 def key_menu_ui(u):
+@1 keys = u.get("keys", [])
+@1 lines = [f"{i+1}. {k[:6]}••••{k[-4:]}" for i, k in enumerate(keys[:10])]
+@1 k_info = f"✅ သိမ်းထားသော Key ({len(keys)}) ခု -\n" + "\n".join(lines) if keys else "❌ API Key မထည့်ရသေးပါ။"
+@1 txt = f"🔑 GEMINI API KEY ROTATION စနစ်\n━━━━━━━━━━━━━━\n{k_info}\n\n💡 Key တစ်ခုချင်းဖြစ်စေ၊ အများကြီးကို Comma (,) ခြားပြီးဖြစ်စေ ပို့နိုင်ပါသည်။\n⚠️ Bot အလုပ်မလုပ်ပါက /start ကို နှိပ်ပါ။"
+@1 kb = [[InlineKeyboardButton("🌐 Google AI Studio မှ Key ယူရန်", url="https://aistudio.google.com/app/apikey")]]
+@1 if keys:
+@2 kb.append([InlineKeyboardButton("🗑️ Key အားလုံး ဖျက်မည်", callback_data="m|clrkeys")])
+@1 kb.append([InlineKeyboardButton("🔙 Dashboard သို့ ပြန်သွားရန်", callback_data="m|dash")])
+@1 return txt, InlineKeyboardMarkup(kb)
+@0 def voice_menu_ui(u):
+@1 cur = u.get("v", "Thiha")
+@1 txt = f"🎙️ Gemini TTS Voice ရွေးချယ်ရန် (Speed: 1.18x)\nလက်ရှိအသံ - 🌟 {cur}\n━━━━━━━━━━━━━━"
+@1 kb = []
+@1 row = []
+@1 for v in VOICES:
+@2 row.append(InlineKeyboardButton(f"{'🟢' if cur==v else '⚪'} {v}", callback_data=f"v|{v}"))
+@2 if len(row) == 3:
+@3 kb.append(row)
+@3 row = []
+@1 if row: kb.append(row)
+@1 kb.append([InlineKeyboardButton("🔙 Dashboard သို့ ပြန်သွားရန်", callback_data="m|dash")])
+@1 return txt, InlineKeyboardMarkup(kb)
+@0 def dash_ui(u, uid):
+@1 k_cnt = len(u.get("keys", []))
+@1 kt = f"✅ ({k_cnt}) ခု ချိတ်ပြီး" if k_cnt > 0 else "❌ မရှိသေးပါ"
+@1 v_lbl = f"🌟 {u.get('v', 'Thiha')} (1.18x)"
+@1 lay = "📱 Blur Frame" if u["layout"] == "frame" else "📲 Full Screen"
+@1 bm = {"auto": "🎯 Auto-Detect", "low": "အောက်ခြေ", "mid": "အလယ်အောက်", "high": "အလယ်", "off": "OFF ❌"}
+@1 b_txt = bm.get(u["blur"], "🎯 Auto-Detect")
+@1 lg_t = ("ON ✅" if u["logo"] else "OFF ❌") if os.path.exists(f"logo_{uid}.jpg") else "ပုံမထည့်ရသေး"
+@1 fl_t = "ON ✅" if u["f"] else "OFF ❌"
+@1 kb = [
+@2 [InlineKeyboardButton(f"🔑 API Keys: {kt}", callback_data="m|key")],
+@2 [InlineKeyboardButton(f"🎙️ Voice: {v_lbl}", callback_data="m|vmenu"), InlineKeyboardButton(f"🖼️ {lay}", callback_data="m|lay")],
+@2 [InlineKeyboardButton(f"🌫️ Blur: {b_txt}", callback_data="m|blur"), InlineKeyboardButton(f"🏷️ Logo: {lg_t}", callback_data="m|logo")],
+@2 [InlineKeyboardButton(f"🪞 Flip + Filter + Crop: {fl_t}", callback_data="m|f")]
+@1 ]
+@1 txt = "⚡ SIGYI AI STUDIO PRO (ULTRA HD) ⚡\n━━━━━━━━━━━━━━\n"
+@1 txt += f"• 🔑 API Keys: {kt} (Auto-Rotation ✅)\n"
+@1 txt += f"• 🎙️ Voice: {v_lbl} (Consistent TTS ✅)\n"
+@1 txt += "• 📜 Script: TikTok Pro Movie Recap Style ✅\n"
+@1 txt += f"• 🖼️ {lay} | 🌫️ Blur: {b_txt}\n"
+@1 txt += "• 🎯 A/V Sync: Constant Frame Rate (CFR) ✅\n━━━━━━━━━━━━━━\n"
+@1 txt += "📥 TikTok / YouTube / Rednote Link သို့မဟုတ် Video ပို့ပါ!\n"
+@1 txt += "💡 (Bot အလုပ်မလုပ်ပါက /start ကို နှိပ်ပါ)"
+@1 return txt, InlineKeyboardMarkup(kb)
+@0 def is_valid_video(p):
+@1 if not os.path.exists(p) or os.path.getsize(p) < 10000:
+@2 return False
+@1 cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_type", "-of", "csv=p=0", p]
+@1 r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+@1 return "video" in r.stdout.lower()
+@0 def is_valid_audio(p):
+@1 if not os.path.exists(p) or os.path.getsize(p) < 600:
+@2 return False
+@1 cmd = ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_type", "-of", "csv=p=0", p]
+@1 r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+@1 return "audio" in r.stdout.lower()
+@0 def download_video(url, output_path):
+@1 if "tiktok.com" in url:
+@2 ydl_opts = {'format': 'best', 'outtmpl': output_path, 'quiet': True, 'no_warnings': True}
+@1 else:
+@2 ydl_opts = {
+@3 'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+@3 'outtmpl': output_path, 'quiet': True, 'nocheckcertificate': True,
+@3 'extractor_args': {'youtube': {'player_client': ['android', 'web', 'ios'], 'skip': ['hls', 'dash']}},
+@3 'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+@2 }
+@2 if os.path.exists('cookies.txt'):
+@3 ydl_opts['cookiefile'] = 'cookies.txt'
+@1 try:
+@2 safe_execution(os.remove, output_path)
+@2 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+@3 ydl.download([url])
+@2 return is_valid_video(output_path)
+@1 except Exception as e:
+@2 logging.error(f"Download Error: {e}")
+@2 return False
+@0 def clean_mm_text(t):
+@1 t = re.sub(r"\([^)]*\)", "", t)
+@1 t = re.sub(r"[*#_`~0-9:a-zA-Z\[\]()|•\-]", " ", t)
+@1 return re.sub(r"\s+", " ", t).strip()
+@0 def get_generate_models(client):
+@1 discovered = []
+@1 try:
+@2 for model in client.models.list():
+@3 name = str(getattr(model, "name", "") or "").removeprefix("models/")
+@3 actions = [str(a).lower() for a in (getattr(model, "supported_actions", None) or [])]
+@3 if not name or (actions and not any("generatecontent" in a for a in actions)):
+@4 continue
+@3 low = name.lower()
+@3 if not any(term in low for term in ("embedding", "tts", "image", "veo", "aqa")) and "flash" in low:
+@4 discovered.append(name)
+@1 except Exception:
+@2 return MODELS
+@1 available = set(discovered)
+@1 preferred = [m for m in MODELS if m in available]
+@1 return preferred + [m for m in discovered if m not in preferred] or MODELS
+@0 def ai_frame_audio_translate(vpath, sm_v, uid, vdur):
+@1 cmd_sm = ["ffmpeg", "-y", "-threads", "2", "-i", vpath, "-t", f"{min(vdur, 180):.2f}", "-vf", "fps=1,scale=280:-2", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "35", "-c:a", "aac", "-b:a", "28k", sm_v]
+@1 subprocess.run(cmd_sm, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=40)
+@1 up_file = sm_v if (os.path.exists(sm_v) and os.path.getsize(sm_v) > 1000) else vpath
+@1 u = get_u(uid)
+@1 keys = u.get("keys", [])
+@1 if not keys:
+@2 raise RuntimeError("API Key မရှိပါ။ Key အရင်ထည့်ပေးပါ။")
+@1 start_idx = u.get("k_idx", 0) % len(keys)
+@1 p = "ဒီ Video ကို သေချာကြည့်ရှုနားထောင်ပြီး TikTok မှာ ခေတ်စားနေတဲ့ Burmese Professional Movie Recap စကားပြောပုံစံဖြင့် အပိုအလိုမရှိ ဘာသာပြန်ပေးပါ။\n"
+@1 p += "အတိအကျ လိုက်နာရမည့်စည်းကမ်းချက်များ -\n"
+@1 p += "၁။ မူရင်းဇာတ်လမ်းအတိုင်းသာ ရေးပါ။ အပို နှုတ်ဆက်စကားများ (ဥပမာ - မင်္ဂလာပါ၊ ကဲ စလိုက်ကြရအောင်) လုံးဝမထည့်ပါနှင့်။\n"
+@1 p += "၂။ အင်္ဂလိပ်စာ၊ ကွင်းစကွင်းပိတ်များ လုံးဝ (လုံးဝ) မထည့်ပါနှင့်။\n"
+@1 p += "၃။ ဥပမာ အရေးအသား - အမျိုးသားတစ်ယောက်ဟာ လှေပေါ်မှာ ဓားနဲ့ ကစားနေရင်း မတော်တဆ အပေါက်ဖောက်မိသွားတဲ့အတွက် ရေတွေ စတင် စိမ့်ဝင်လာပါတယ်။ ရေတွေက သင်္ဘောကုန်းပတ်ပေါ်အထိ လျင်မြန်စွာ တက်လာချိန်မှာပဲ တခြားလှေတစ်စင်း ချဉ်းကပ်လာတာကို သူ မြင်လိုက်ရပါတယ်။ သူက သူ့ခြေထောက်နဲ့ အပေါက်ကို အမြန်ဖုံးအုပ်ပြီး ဘာမှမဖြစ်သလို ဟန်ဆောင်လိုက်ပါတယ်။\n"
+@1 raw_txt, last_err = "", None
+@1 for step_i in range(len(keys)):
+@2 k_i = (start_idx + step_i) % len(keys)
+@2 client = genai.Client(api_key=keys[k_i].strip(), http_options=types.HttpOptions(timeout=40000))
+@2 model_candidates = get_generate_models(client)
+@2 uf = safe_execution(lambda: client.files.upload(file=up_file))
+@2 if not uf:
+@3 continue
+@2 for _ in range(120):
+@3 if getattr(getattr(uf, "state", None), "name", "") == "PROCESSING":
+@4 time.sleep(1)
+@4 uf = safe_execution(lambda: client.files.get(name=uf.name)) or uf
+@2 if getattr(getattr(uf, "state", None), "name", "") == "PROCESSING":
+@3 last_err = RuntimeError("Gemini video file is still processing")
+@3 safe_execution(lambda: client.files.delete(name=uf.name))
+@3 continue
+@2 for m_name in model_candidates:
+@3 try:
+@4 res = client.models.generate_content(model=m_name, contents=[uf, p])
+@4 if res and res.text:
+@5 raw_txt = res.text
+@5 set_u(uid, "k_idx", k_i)
+@5 break
+@3 except Exception as me:
+@4 last_err = me
+@4 if any(w in str(me).upper() for w in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "API_KEY", "PERMISSION", "403"]):
+@5 continue
+@2 safe_execution(lambda: client.files.delete(name=uf.name))
+@2 if raw_txt:
+@3 break
+@1 if not raw_txt:
+@2 err_text = str(last_err or "Unknown Gemini API error")
+@2 if any(w in err_text.upper() for w in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "LIMIT: 0"]):
+@3 raise RuntimeError("Gemini API quota ပြည့်နေပါသည်။ Key အသစ်ထည့်ပြီး ပြန်စမ်းပေးပါ။")
+@2 raise RuntimeError(f"Gemini API Error: {err_text[:600]}")
+@1 text_chunks = [s.strip() + "။" for s in clean_mm_text(raw_txt).split("။") if len(s.strip()) > 3]
+@1 return text_chunks
+@0 def generate_gemini_tts_chunk(text, voice_name, output_path, uid):
+@1 u = get_u(uid)
+@1 keys = u.get("keys", [])
+@1 if not keys: return False
+@1 start_idx = u.get("k_idx", 0)
+@1 pvc = types.PrebuiltVoiceConfig(voice_name=voice_name)
+@1 sc = types.SpeechConfig(voice_config=types.VoiceConfig(prebuilt_voice_config=pvc))
+@1 cfg = types.GenerateContentConfig(response_modalities=["AUDIO"], speech_config=sc)
+@1 prompt = f"Read the following Burmese text aloud naturally:\n{text}"
+@1 max_retries = 5
+@1 for attempt in range(max_retries):
+@2 for step_i in range(len(keys)):
+@3 k_i = (start_idx + step_i) % len(keys)
+@3 client = genai.Client(api_key=keys[k_i].strip(), http_options=types.HttpOptions(timeout=35000))
+@3 for tm in TTS_MODELS:
+@4 try:
+@5 res = client.models.generate_content(model=tm, contents=prompt, config=cfg)
+@5 pcm = b""
+@5 for part in res.candidates[0].content.parts:
+@6 if getattr(part, "inline_data", None) and part.inline_data.data:
+@7 d = part.inline_data.data
+@7 pcm += base64.b64decode(d) if isinstance(d, str) else d
+@5 if pcm and len(pcm) > 800:
+@6 if pcm[:4] == b"RIFF":
+@7 open(output_path, "wb").write(pcm)
+@6 else:
+	@7 with wave.open(output_path, "wb") as wf:
+@8 wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(24000); wf.writeframes(pcm)
+@6 if is_valid_audio(output_path):
+@7 set_u(uid, "k_idx", k_i)
+@7 return True
+@4 except Exception as e:
+@5 error_msg = str(e).lower()
+@5 if "429" in error_msg or "quota" in error_msg or "limit" in error_msg:
+@6 continue
+@2 wait_time = 5 * (attempt + 1)
+@2 time.sleep(wait_time)
+@1 return False
+@0 async def generate_consistent_tts(text_chunks, out_path, voice_name, uid):
+@1 temp_files = []
+@1 for i, chunk in enumerate(text_chunks):
+@2 temp_file = f"temp_gemini_{uid}_{i}.mp3"
+@2 success = await asyncio.to_thread(generate_gemini_tts_chunk, chunk, voice_name, temp_file, uid)
+@2 if not success:
+@3 raise RuntimeError(f"Chunk {i} တွင် TTS Error ဖြစ်ပွားပါသည်။")
+@2 temp_files.append(temp_file)
+@1 list_file_path = f"concat_list_{uid}.txt"
+@1 with open(list_file_path, "w", encoding="utf-8") as f:
+@2 for file in temp_files:
+@3 f.write(f"file '{os.path.abspath(file)}'\n")
+@1 cmd = ['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', list_file_path, '-c', 'copy', out_path]
+@1 subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+@1 for file in temp_files:
+@2 safe_execution(os.remove, file)
+@1 safe_execution(os.remove, list_file_path)
+@1 if not is_valid_audio(out_path):
+@2 raise RuntimeError("Concat error")
+@1 return True
+@0 def get_first_speech_time(video_path):
+@1 cmd = ['ffmpeg', '-i', video_path, '-af', 'silencedetect=noise=-30dB:d=0.5', '-f', 'null', '-']
+@1 r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+@1 for line in r.stderr.split('\n'):
+@2 if 'silence_end' in line:
+@3 parts = line.split('silence_end: ')
+@3 if len(parts) > 1:
+@4 return float(parts[1].split(' ')[0])
+@1 return 0.0
+@0 def detect_sub_band(iv, vdur, is_fr, uid):
+@1 raw_f = f"subdet_{uid}.raw"
+@1 w, h = 360, (410 if is_fr else 640)
+@1 vf = f"fps=6/{max(2.0, vdur):.2f},crop=iw*0.92:ih*0.92:iw*0.04:ih*0.04,scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}"
+@1 subprocess.run(["ffmpeg", "-y", "-threads", "1", "-i", iv, "-vf", vf, "-frames:v", "6", "-f", "rawvideo", "-pix_fmt", "gray", raw_f], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+@1 dy, dh = (950, 86) if is_fr else (1040, 92)
+@1 if not os.path.exists(raw_f):
+@2 return dy, dh
+@1 data = open(raw_f, "rb").read()
+@1 safe_execution(os.remove, raw_f)
+@1 n_f = len(data) // (w * h)
+@1 if n_f < 1:
+@2 return dy, dh
+@1 ys, ye, scores = int(h * 0.56), int(h * 0.96), [0.0] * h
+@1 for f_i in range(n_f):
+@2 b = f_i * w * h
+@2 for y in range(ys, ye):
+@3 ro = b + y * w
+@3 hits = sum(1 for x in range(int(w * 0.15), int(w * 0.85), 2) if abs(data[ro + x] - data[ro + x - 2]) > 40)
+@3 if hits > 8:
+@4 scores[y] += hits
+@1 by_i = max(range(ys, ye - 16), key=lambda y: sum(scores[y:y + 16]), default=-1)
+@1 if by_i < 0 or sum(scores[by_i:by_i + 16]) < 25 * n_f:
+@2 return dy, dh
+@1 out_c = int((by_i + 8) * 2.0) + (230 if is_fr else 0)
+@1 return max(240 if is_fr else 100, min((1050 - dh) if is_fr else (1240 - dh), out_c - int(dh * 0.46))), dh
+@0 def get_duration(file_path):
+@1 cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', file_path]
+@1 try:
+@2 result = subprocess.run(cmd, stdout=subprocess.PIPE, text=True, stderr=subprocess.PIPE)
+@2 return float(result.stdout.strip())
+@1 except:
+@2 return 0.0
+@0 def render_synced_video(video_path, audio_path, output_path, u, uid):
+@1 audio_speed = 1.18
+@1 vid_dur = get_duration(video_path)
+@1 aud_dur = get_duration(audio_path)
+@1 if vid_dur == 0 or aud_dur == 0:
+@2 raise RuntimeError("Video သို့မဟုတ် Audio ဖိုင် ပျက်နေပါသည်။")
+@1 intro_delay = get_first_speech_time(video_path)
+@1 new_aud_dur = aud_dur / audio_speed
+@1 total_aud_dur = intro_delay + new_aud_dur
+@1 video_pts_factor = vid_dur / total_aud_dur if total_aud_dur > 0 else 1.0
+@1 is_fr, fl = (u.get("layout", "frame") == "frame"), (",hflip" if u.get("f") else "")
+@1 adj = "crop=iw*0.92:ih*0.92:iw*0.04:ih*0.04,eq=contrast=1.08:brightness=0.02:saturation=1.14:gamma=1.03,hue=h=3,unsharp=3:3:0.65:3:3:0.0"
+@1 b_map = {"low": (950, 86), "mid": (880, 86), "high": (790, 86)} if is_fr else {"low": (1040, 92), "mid": (940, 92), "high": (830, 92)}
+@1 by, bh = detect_sub_band(video_path, vid_dur, is_fr, uid) if u.get("blur") == "auto" else b_map.get(u.get("blur"), (950, 86))
+@1 by, bh = (int(by) // 2) * 2, max(64, (int(bh) // 2) * 2)
+@1 v_filt = f"setpts={video_pts_factor}*PTS,fps=30"
+@1 fc = f"[0:v]{v_filt}{fl}[v0];"
+@1 if is_fr:
+@2 fc += f"[v0]split=2[bgi][fgi];[bgi]scale=180:320:force_original_aspect_ratio=increase,crop=180:320,gblur=sigma=14,eq=brightness=-0.07,scale=720:1280[bg];[fgi]{adj},scale=720:820:force_original_aspect_ratio=increase:flags=lanczos,crop=720:820[fg];[bg][fg]overlay=0:230[v1]"
+@1 else:
+@2 fc += f"[v0]{adj},scale=720:1280:force_original_aspect_ratio=increase:flags=lanczos,crop=720:1280[v1]"
+@1 cur = "[v1]"
+@1 if u.get("blur") != "off":
+@2 fc += f";{cur}split=2[m1][m2];[m2]crop=640:{bh}:40:{by},gblur=sigma=26[bst];[m1][bst]overlay=40:{by}[v2]"
+@2 cur = "[v2]"
+@1 inputs, logo_p = ["-i", video_path, "-i", audio_path], f"logo_{uid}.jpg"
+@1 if u.get("logo") and os.path.exists(logo_p):
+@2 inputs.extend(["-i", logo_p])
+@2 ly = 165 if is_fr else 80
+@2 fc += f";[2:v]scale=110:110[lg];{cur}[lg]overlay=12:{ly}[v3]"
+@2 cur = "[v3]"
+@1 delay_ms = int(intro_delay * 1000)
+@1 a_filt = f"atempo={audio_speed},adelay={delay_ms}|{delay_ms}" if delay_ms > 0 else f"atempo={audio_speed}"
+@1 fc += f";[1:a]{a_filt}[aout]"
+@1 cmd = ["ffmpeg", "-y", "-stream_loop", "-1"] + inputs[:2]
+@1 if len(inputs) > 4:
+@2 cmd.extend(inputs[4:])
+@1 cmd += ["-filter_complex", fc, "-map", cur, "-map", "[aout]", "-c:v", "libx264", "-preset", "superfast", "-crf", "19", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-shortest", "-fs", "47M", output_path]
+@1 r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=600)
+@1 if r.returncode != 0 or not is_valid_video(output_path):
+@2 raise RuntimeError(f"Render Error: {r.stderr[-500:]}")
+@1 return True
+@0 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+@1 uid = update.effective_user.id
+@1 cancel_user_task(uid)
+@1 u = get_u(uid)
+@1 if not u.get("verified") or not (await check_joined(context.bot, uid)):
+@2 set_u(uid, "verified", False)
+@2 await update.message.reply_text(join_text(), reply_markup=join_kb(), disable_web_page_preview=True)
+@2 return
+@1 await update.message.reply_text("👋 Sigyi Ai Studio မှ ကြိုဆိုပါတယ်! (System Ready ✅)", reply_markup=main_kb())
+@1 txt, kb = dash_ui(u, uid)
+@1 await update.message.reply_text(txt, reply_markup=kb)
+@0 async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+@1 uid = update.effective_user.id
+@1 u = get_u(uid)
+@1 if not u.get("verified") or not (await check_joined(context.bot, uid)):
+@2 set_u(uid, "verified", False)
+@2 await update.message.reply_text(join_text(), reply_markup=join_kb(), disable_web_page_preview=True)
+@2 return
+@1 if update.message.photo:
+@2 f = await context.bot.get_file(update.message.photo[-1].file_id)
+@2 await f.download_to_drive(f"logo_{uid}.jpg")
+@2 set_u(uid, "logo", True)
+@2 txt, kb = dash_ui(get_u(uid), uid)
+@2 await update.message.reply_text("✅ Logo ပုံ သိမ်းဆည်းပြီးပါပြီ!\n\n" + txt, reply_markup=kb)
+@2 return
+@1 t = (update.message.text or "").strip()
+@1 if t in ["🎬 Dashboard", "🔑 API Key", "🎙️ Voice ရွေးရန်", "🖼️ Logo ပုံထည့်ရန်"]:
+@2 if t == "🖼️ Logo ပုံထည့်ရန်":
+@3 await update.message.reply_text("🖼️ ဘယ်ဘက်အပေါ်ထောင့်မှာ ထည့်ချင်တဲ့ Logo ပုံ (Photo) ကို ပို့ပေးပါ။")
+@3 return
+@2 txt, kb = dash_ui(u, uid) if t == "🎬 Dashboard" else (key_menu_ui(u) if t == "🔑 API Key" else voice_menu_ui(u))
+@2 await update.message.reply_text(txt, reply_markup=kb)
+@2 return
+@1 um = re.search(r"https?://[^\s，。、！!\"'<>]+", t)
+@1 p_keys = extract_keys(t) if not um else []
+@1 if p_keys:
+@2 added, total = add_user_keys(uid, p_keys)
+@2 safe_execution(lambda: asyncio.create_task(update.message.delete()))
+@2 txt, kb = dash_ui(get_u(uid), uid)
+@2 await context.bot.send_message(uid, f"✅ API Key ({added}) ခု အသစ်ထပ်ပေါင်းပြီး စုစုပေါင်း ({total}) ခု သိမ်းဆည်းပြီးပါပြီ!\n\n" + txt, reply_markup=kb)
+@2 return
+@1 if not u.get("keys"):
+@2 txt, kb = key_menu_ui(u)
+@2 await update.message.reply_text("🔒 Gemini API Key အရင်ထည့်ပေးပါ!\n\n" + txt, reply_markup=kb)
+@2 return
+@1 cancel_user_task(uid)
+@1 msg = await update.message.reply_text("⏳ [15%] Video စတင် Download လုပ်နေပါသည်...\n💡 (အကယ်၍ ရပ်နေပါက /start နှိပ်ပါ)", reply_markup=cancel_kb())
+@1 vpath = f"in_{uid}.mp4"
+@1 try:
+@2 if um:
+@3 await asyncio.wait_for(asyncio.to_thread(download_video, um.group(0), vpath), timeout=180)
+@2 if not um and (update.message.video or update.message.document):
+@3 v = update.message.video or update.message.document
+@3 f = await context.bot.get_file(v.file_id)
+@3 await f.download_to_drive(vpath)
+@2 if not is_valid_video(vpath):
+@3 await msg.edit_text("❌ Video ဖိုင် မမှန်ကန်ပါ သို့မဟုတ် Video Link ပို့ပါ!\n💡 (Bot အလုပ်မလုပ်ပါက /start နှိပ်ပါ)")
+@3 return
+@2 SESSIONS[uid] = vpath
+@2 txt, kb = dash_ui(u, uid)
+@2 btn = InlineKeyboardButton(f"🚀 START RENDER (🌟 {u['v']} 1.18x | Ultra HD)", callback_data="r|go")
+@2 await msg.edit_text("🎬 Video ရပြီ! စတင်ရန် START RENDER ကို နှိပ်ပါ -\n\n" + txt, reply_markup=InlineKeyboardMarkup(list(kb.inline_keyboard) + [[btn]]))
+@1 except Exception as e:
+@2 err_m = str(e).strip() or type(e).__name__
+@2 await msg.edit_text(f"❌ Download Error: {err_m}\n\n💡 Bot အလုပ်မလုပ်ပါက /start ကို နှိပ်ပါ။")
+@0 async def run_render_job(q, context, uid):
+@1 u, vpath = get_u(uid), SESSIONS.get(uid)
+@1 sm_v, apath, opath = f"sm_{uid}.mp4", f"aud_{uid}.m4a", f"out_{uid}.mp4"
+@1 hint = "\n\n💡 ရပ်နေပါက /start နှိပ်ပြီး video ပြန်ပို့ပါ"
+@1 stage = "စတင်နေပါသည်"
+@1 try:
+@2 if not vpath or not is_valid_video(vpath):
+@3 raise RuntimeError("Input video မမှန်ကန်ပါ")
+@2 vdur = get_duration(vpath)
+@2 stage = "Gemini scene analysis"
+@2 await q.edit_message_text(f"🔄 [30%] Video ကို TikTok Pro Recap အဖြစ် ဘာသာပြန်နေပါသည်...{hint}", reply_markup=cancel_kb())
+@2 seg_scripts = await asyncio.wait_for(asyncio.to_thread(ai_frame_audio_translate, vpath, sm_v, uid, vdur), timeout=max(180, int(vdur * 2.5)))
+@2 stage = "TTS voice generation"
+@2 await q.edit_message_text(f"🔄 [60%] 🎙️ Gemini TTS ({u['v']}) ဖြင့် အသံ ဖန်တီးနေပါသည်...{hint}", reply_markup=cancel_kb())
+@2 await asyncio.wait_for(generate_consistent_tts(seg_scripts, apath, u["v"], uid), timeout=240)
+@2 stage = "FFmpeg video/audio render"
+@2 await q.edit_message_text(f"🔄 [85%] Video နှင့် အသံ ကွက်တိကိုက်ညီအောင် Render လုပ်နေပါသည်...{hint}", reply_markup=cancel_kb())
+@2 await asyncio.wait_for(asyncio.to_thread(render_synced_video, vpath, apath, opath, u, uid), timeout=max(360, int(vdur * 6)))
+@2 await q.edit_message_text("📤 [98%] Ultra HD Video ပို့ပေးနေပါတယ်...")
+@2 with open(opath, "rb") as vf:
+@3 await context.bot.send_video(uid, vf, caption="✅ ပြီးပါပြီ။\nPowered by SiGyi Ai Studio", read_timeout=300, write_timeout=300)
+@2 await q.delete_message()
+@1 except asyncio.CancelledError:
+@2 pass
+@1 except asyncio.TimeoutError:
+@2 safe_execution(lambda: asyncio.create_task(q.edit_message_text(f"❌ {stage} အဆင့်မှာ အချိန်ကျော်သွားပါတယ်။ /start နှိပ်ပြီး ပြန်စမ်းပေးပါ။")))
+@1 except Exception as e:
+@2 err = str(e).strip() or type(e).__name__
+@2 safe_execution(lambda: asyncio.create_task(q.edit_message_text(f"❌ {stage} Error: {err[:800]}\n\n💡 /start နှိပ်ပြီး ပြန်စမ်းပါ")))
+@1 finally:
+@2 ACTIVE_TASKS.pop(uid, None)
+@2 SESSIONS.pop(uid, None)
+@2 for p in [vpath, sm_v, apath, opath]:
+@3 if p and os.path.exists(p):
+@4 safe_execution(os.remove, p)
+@0 async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+@1 q = update.callback_query
+@1 uid, u = q.from_user.id, get_u(q.from_user.id)
+@1 cat, act = q.data.split("|")
+@1 if cat == "verify":
+@2 if not (await check_joined(context.bot, uid)):
+@3 await q.answer("❌ Channel (၃) ခုလုံးကို အရင် Join ပေးပါ!", show_alert=True)
+@3 return
+@2 set_u(uid, "verified", True)
+@2 await q.answer("✅ Verify အောင်မြင်ပါပြီ!")
+@2 await context.bot.send_message(uid, "🎉 Verify အောင်မြင်ပါပြီ! Sigyi Ai Studio ကို စတင်အသုံးပြုနိုင်ပါပြီ။", reply_markup=main_kb())
+@2 txt, kb = dash_ui(get_u(uid), uid)
+@2 await q.edit_message_text(txt, reply_markup=kb)
+@2 return
+@1 if cat == "r" and act == "cancel":
+@2 cancel_user_task(uid)
+@2 await q.answer("🛑 ရပ်တန့်လိုက်ပါပြီ!")
+@2 txt, kb = dash_ui(get_u(uid), uid)
+@2 await q.edit_message_text("🛑 လုပ်ငန်းစဉ်ကို ရပ်တန့်ပြီး Reset လုပ်ပေးထားပါသည်။\n\n" + txt, reply_markup=kb)
+@2 return
+@1 if not u.get("verified") or not (await check_joined(context.bot, uid)):
+@2 set_u(uid, "verified", False)
+@2 await q.answer("🔒 Channel (၃) ခုကို အရင် Join ပေးပါ!", show_alert=True)
+@2 await q.edit_message_text(join_text(), reply_markup=join_kb(), disable_web_page_preview=True)
+@2 return
+@1 await q.answer()
+@1 if cat == "m" and act in ["key", "vmenu"]:
+@2 txt, kb = key_menu_ui(u) if act == "key" else voice_menu_ui(u)
+@2 await q.edit_message_text(txt, reply_markup=kb)
+@2 return
+@1 if cat == "m" and act == "clrkeys":
+@2 set_u(uid, "keys", [])
+@2 set_u(uid, "k_idx", 0)
+@2 txt, kb = key_menu_ui(get_u(uid))
+@2 await q.edit_message_text(txt, reply_markup=kb)
+@2 return
+@1 if cat == "v" and act in VOICES:
+@2 set_u(uid, "v", act)
+@1 if cat == "m" and act in ["lay", "blur", "logo", "f"]:
+@2 bm = ["auto", "low", "mid", "high", "off"]
+@2 if act == "lay":
+@3 set_u(uid, "layout", "full" if u["layout"] == "frame" else "frame")
+@2 if act == "blur":
+@3 set_u(uid, "blur", bm[(bm.index(u["blur"] if u["blur"] in bm else "auto") + 1) % len(bm)])
+@2 if act == "logo":
+@3 set_u(uid, "logo", not u["logo"])
+@2 if act == "f":
+@3 set_u(uid, "f", not u["f"])
+@1 if cat in ["v", "m"]:
+@2 u_new = get_u(uid)
+@2 txt, kb = dash_ui(u_new, uid)
+@2 rows = list(kb.inline_keyboard)
+@2 if uid in SESSIONS and os.path.exists(SESSIONS[uid]):
+@3 rows.append([InlineKeyboardButton(f"🚀 START RENDER (🌟 {u_new['v']} 1.18x | Ultra HD)", callback_data="r|go")])
+@2 await q.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(rows))
+@2 return
+@1 if cat == "r" and act == "go":
+@2 if uid not in SESSIONS or not os.path.exists(SESSIONS[uid]):
+@3 await q.edit_message_text("⚠️ Video အသစ် ပြန်ပို့ပါ။ (Bot အလုပ်မလုပ်ပါက /start နှိပ်ပါ)")
+@3 return
+@2 if not u.get("keys"):
+@3 txt, kb = key_menu_ui(u)
+@3 await q.edit_message_text("🔒 API Key အရင်ထည့်ပေးပါ!\n\n" + txt, reply_markup=kb)
+@3 return
+@2 if (old_t := ACTIVE_TASKS.pop(uid, None)) and not old_t.done():
+@3 old_t.cancel()
+@2 ACTIVE_TASKS[uid] = asyncio.create_task(run_render_job(q, context, uid))
+@0 def main():
+@1 if not TOKEN:
+@2 raise RuntimeError("Railway Variables ထဲ TELEGRAM_BOT_TOKEN မသတ်မှတ်ရသေးပါ။")
+@1 app = Application.builder().token(TOKEN).concurrent_updates(True).read_timeout(240).write_timeout(240).build()
+@1 app.add_handler(CommandHandler("start", start))
+@1 app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.VIDEO | (filters.TEXT & ~filters.COMMAND), handle_msg))
+@1 app.add_handler(CallbackQueryHandler(cb_handler))
+@1 app.run_polling()
+@0 if __name__ == "__main__":
+@1 main()
+"""; exec(compile("\n".join("    "*int(m[1])+m[2] for l in CODE.splitlines() if (m:=re.match(r"^\s*@(\d)\s(.*)$",l))),"bot.py","exec"),globals())
