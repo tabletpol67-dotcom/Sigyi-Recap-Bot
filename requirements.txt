@@ -6,3 +6,4 @@ yt-dlp[default,curl-cffi]
 pytubefix
 btch-downloader
 google-generativeai
+faster-whisper
