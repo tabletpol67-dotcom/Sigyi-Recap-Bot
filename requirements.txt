@@ -1,6 +1,0 @@
-gradio
-google-genai
-yt-dlp
-edge-tts
-gTTS
-pytubefix
