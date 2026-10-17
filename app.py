@@ -249,13 +249,13 @@ async def process_video_gradio(api_key, voice_choice, layout_choice, blur_choice
     gr.Info("🎬 [3/3] အသံနှင့် Video ကို Frame အလိုက် Sync လုပ်၍ Render လုပ်နေပါသည်...")
     await asyncio.to_thread(edit_vid, sm_v, apath, opath, layout_choice, blur_choice, source_vdur, analysis)
     
-    # Cleanup Temp Files
+        # Cleanup Temp Files
     for p in [sm_v, apath]:
         try_run(os.remove, p)
-
-  gr.Info("✅ အောင်မြင်စွာ ဖန်တီးပြီးပါပြီ။ အောက်တွင် Download လုပ်နိုင်ပါသည်။")
+        
+    gr.Info("✅ အောင်မြင်စွာ ဖန်တီးပြီးပါပြီ။ အောက်တွင် Download လုပ်နိုင်ပါသည်။")
     return opath
-
+    
 # --- Gradio UI Layout (Dark Theme) ---
 custom_theme = gr.themes.Monochrome(
     primary_hue="slate", secondary_hue="gray", neutral_hue="zinc",
